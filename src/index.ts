@@ -56,6 +56,7 @@ type Bindings = {
   DB: D1Database
   BUCKET: R2Bucket
   SECRETS_STORE: KVNamespace
+  PEPPER: string
 }
 
 type Lang = (typeof I18N)['pl'] | (typeof I18N)['en']
@@ -136,9 +137,9 @@ function safeCompare(a: string, b: string): boolean {
   return mismatch === 0
 }
 
-const hashPwd = async (p: string | null | undefined): Promise<string | null> => {
+const hashPwd = async (p: string | null | undefined, pepper: string): Promise<string | null> => {
   if (!p) return null
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(p))
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(p + pepper))
   return Array.from(new Uint8Array(buf))
     .map((x) => x.toString(16).padStart(2, '0'))
     .join('')
@@ -165,8 +166,8 @@ app.use(
 
 // Bindings guard — fail fast if Cloudflare bindings are not attached
 app.use('*', async (c, next) => {
-  if (!c.env.DB || !c.env.BUCKET || !c.env.SECRETS_STORE) {
-    return c.text('System Error: Missing Bindings (DB/BUCKET/KV)', 500)
+  if (!c.env.DB || !c.env.BUCKET || !c.env.SECRETS_STORE || !c.env.PEPPER) {
+    return c.text('System Error: Missing Bindings (DB/BUCKET/KV/PEPPER)', 500)
   }
   return next()
 })
@@ -247,6 +248,7 @@ app.post('/api/upload/init', async (c) => {
   if ((s?.t ?? 0) + size > CONFIG.maxStorage) {
     return c.json({ error: 'STORAGE_LIMIT' }, 507)
   }
+  const safeTtl = Math.min(ttl ?? 172_800_000, CONFIG.maxTtl * 1000)
   const id = crypto.randomUUID()
   const mp = await c.env.BUCKET.createMultipartUpload(id)
   await c.env.DB.prepare(
@@ -257,8 +259,8 @@ app.post('/api/upload/init', async (c) => {
       filename,
       size,
       Date.now(),
-      Date.now() + (ttl ?? 172_800_000),
-      await hashPwd(password),
+      Date.now() + safeTtl,
+      await hashPwd(password, c.env.PEPPER),
       parseInt(String(limit ?? 1))
     )
     .run()
@@ -328,7 +330,7 @@ async function handleFileDownload(c: Context<{ Bindings: Bindings }>): Promise<R
     if (!pwdParam) {
       return c.html(renderReceiveFile(f.filename, lang), 200, HTML_SECURITY_HEADERS)
     }
-    if ((await hashPwd(pwdParam)) !== f.password_hash) {
+    if ((await hashPwd(pwdParam, env.PEPPER)) !== f.password_hash) {
       const att = (f.failed_attempts ?? 0) + 1
       if (att >= CONFIG.maxAttempts) {
         c.executionCtx.waitUntil(env.BUCKET.delete(id))
