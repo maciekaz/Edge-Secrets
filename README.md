@@ -53,22 +53,47 @@ Szyfrowanie odbywa się **wyłącznie w przeglądarce**. Serwer nigdy nie widzi 
 
 Pliki **nie są szyfrowane po stronie klienta** — trafiają bezpośrednio do R2. Ochrona odbywa się przez:
 
-- opcjonalne hasło (SHA-256 hasha weryfikowane server-side)
+- opcjonalne hasło (`SHA-256(hasło + PEPPER)` weryfikowane server-side)
 - limit pobrań (1 raz, 5 razy lub bez limitu)
-- TTL (12h / 2 dni / 7 dni)
+- TTL wymuszony server-side — maksymalnie 72h niezależnie od wartości z frontendu
 - automatyczne usunięcie po wygaśnięciu (cron co godzinę)
 - blokada po 3 błędnych hasłach → plik usuwany natychmiast
+
+#### Hashowanie hasła pliku — Global Pepper
+
+Hasła do plików są hashowane jako `SHA-256(hasło + PEPPER)`, gdzie `PEPPER` to globalny sekret przechowywany jako Cloudflare Secret (nie w kodzie, nie w repozytorium). Oznacza to, że nawet w przypadku wycieku bazy danych D1 hasze haseł są bezużyteczne bez znajomości peppera.
+
+```
+hasło użytkownika  ──┐
+                     ├─► SHA-256 ──► hash w D1
+PEPPER (CF Secret) ──┘
+```
+
+Worker nie wystartuje jeśli `PEPPER` nie jest ustawiony (`bindings guard`).
+
+#### Limit TTL plików
+
+Backend wymusza maksymalny czas życia pliku równy `CONFIG.maxTtl` (72h), niezależnie od wartości przysłanej przez klienta:
+
+```
+safeTtl = Math.min(ttl_z_frontendu, CONFIG.maxTtl * 1000)
+```
+
+Identyczna logika jak przy sekretach tekstowych w KV.
 
 ---
 
 ## Zabezpieczenia
 
 - **Burn-on-read** — sekret kasowany z KV po pierwszym poprawnym odczycie
-- **Rate limiting hasła** — max 3 próby, potem trwałe usunięcie
+- **Rate limiting hasła** — max 3 próby, potem trwałe usunięcie (dotyczy zarówno sekretów jak i plików)
+- **Global Pepper** — hasła do plików hashowane z globalnym sekretem (`PEPPER`) z Cloudflare Secrets; wyciek D1 nie kompromituje haseł
+- **TTL cap server-side** — maksymalny czas życia pliku wymuszany przez backend (72h), frontend nie może go przekroczyć
 - **CF Access** — endpointy tworzenia (`/gen`, `/api/store`, `/api/upload`, `/api/stats`) dostępne tylko dla uwierzytelnionych użytkowników
 - **Security headers** — CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy
 - **RFC 5987** — bezpieczne kodowanie nazw plików w nagłówku `Content-Disposition`
 - **Brak logowania treści** — błędy zwracają generyczne komunikaty (bez `e.message`)
+- **Bindings guard** — worker zwraca 500 przy starcie jeśli brakuje któregokolwiek z wymaganych bindingów (DB, BUCKET, KV, PEPPER)
 
 ---
 
@@ -127,7 +152,25 @@ binding = "BUCKET"
 bucket_name = "<R2_BUCKET_NAME>"
 ```
 
+### Wymagany sekret (Cloudflare Secret)
+
+`PEPPER` musi być ustawiony przed deployem — nie trafia do repozytorium ani `wrangler.toml`:
+
+```bash
+# Wygeneruj silny losowy pepper:
+openssl rand -base64 32
+
+# Ustaw jako Cloudflare Secret:
+npx wrangler secret put PEPPER
+```
+
 ### Lokalny development
+
+Utwórz plik `.dev.vars` (ignorowany przez git):
+
+```ini
+PEPPER=lokalny-pepper-tylko-do-testow
+```
 
 ```bash
 npx wrangler dev
