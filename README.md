@@ -89,11 +89,11 @@ Identyczna logika jak przy sekretach tekstowych w KV.
 - **Rate limiting hasła** — max 3 próby, potem trwałe usunięcie (dotyczy zarówno sekretów jak i plików)
 - **Global Pepper** — hasła do plików hashowane z globalnym sekretem (`PEPPER`) z Cloudflare Secrets; wyciek D1 nie kompromituje haseł
 - **TTL cap server-side** — maksymalny czas życia pliku wymuszany przez backend (72h), frontend nie może go przekroczyć
-- **CF Access** — endpointy tworzenia (`/gen`, `/api/store`, `/api/upload`, `/api/stats`) dostępne tylko dla uwierzytelnionych użytkowników
+- **CF Access + weryfikacja JWT w kodzie** — endpointy tworzenia (`/gen`, `/api/store`, `/api/upload`, `/api/stats`) blokowane dwuwarstwowo: najpierw przez Cloudflare Access policy, następnie Worker weryfikuje podpis JWT (RS256) bezpośrednio w kodzie. Worker pobiera klucze publiczne z JWKS endpoint (`/cdn-cgi/access/certs`) i cachuje je in-isolate przez 1h
 - **Security headers** — CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy
 - **RFC 5987** — bezpieczne kodowanie nazw plików w nagłówku `Content-Disposition`
 - **Brak logowania treści** — błędy zwracają generyczne komunikaty (bez `e.message`)
-- **Bindings guard** — worker zwraca 500 przy starcie jeśli brakuje któregokolwiek z wymaganych bindingów (DB, BUCKET, KV, PEPPER)
+- **Bindings guard** — worker zwraca 500 przy starcie jeśli brakuje któregokolwiek z wymaganych bindingów (DB, BUCKET, KV, PEPPER, CF_TEAM_DOMAIN, CF_AUD)
 
 ---
 
@@ -152,17 +152,25 @@ binding = "BUCKET"
 bucket_name = "<R2_BUCKET_NAME>"
 ```
 
-### Wymagany sekret (Cloudflare Secret)
+### Wymagane sekrety (Cloudflare Secrets)
 
-`PEPPER` musi być ustawiony przed deployem — nie trafia do repozytorium ani `wrangler.toml`:
+Żaden z poniższych nie trafia do repozytorium ani `wrangler.toml`. Worker nie wystartuje bez wszystkich trzech.
 
 ```bash
-# Wygeneruj silny losowy pepper:
+# 1. Globalny pepper dla haszy haseł plików
 openssl rand -base64 32
-
-# Ustaw jako Cloudflare Secret:
 npx wrangler secret put PEPPER
+
+# 2. Domena zespołu Cloudflare Access
+npx wrangler secret put CF_TEAM_DOMAIN
+# → np. yourteam.cloudflareaccess.com
+
+# 3. Application Audience (AUD) tag
+# Znajdziesz go w: CF Zero Trust → Access → Applications → (aplikacja) → Overview → AUD Tag
+npx wrangler secret put CF_AUD
 ```
+
+> **Ważne:** `CF_AUD` jest unikalny dla każdej aplikacji CF Access. Bez niego weryfikacja JWT zawsze zwróci 401. Upewnij się też, że w CF Zero Trust masz skonfigurowaną **Access Policy** dla odpowiednich ścieżek (`/gen`, `/api/store`, `/api/stats`, `/api/upload`).
 
 ### Lokalny development
 
@@ -170,7 +178,11 @@ Utwórz plik `.dev.vars` (ignorowany przez git):
 
 ```ini
 PEPPER=lokalny-pepper-tylko-do-testow
+CF_TEAM_DOMAIN=yourteam.cloudflareaccess.com
+CF_AUD=twoj-aud-tag
 ```
+
+> W lokalnym dev żądania nie przechodzą przez CF Access, więc chronione endpointy wymagają ręcznego przekazania tokenu JWT w nagłówku `Cf-Access-Jwt-Assertion`.
 
 ```bash
 npx wrangler dev
