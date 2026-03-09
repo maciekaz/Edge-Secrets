@@ -73,7 +73,7 @@ Worker nie wystartuje jeśli `PEPPER` nie jest ustawiony (`bindings guard`).
 
 #### Limit TTL plików
 
-Backend wymusza maksymalny czas życia pliku równy `CONFIG.maxTtl` (72h), niezależnie od wartości przysłanej przez klienta:
+Backend wymusza maksymalny czas życia pliku równy `CONFIG.maxTtl` (7dni), niezależnie od wartości przysłanej przez klienta:
 
 ```
 safeTtl = Math.min(ttl_z_frontendu, CONFIG.maxTtl * 1000)
