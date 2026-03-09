@@ -4,7 +4,7 @@ import { cors } from 'hono/cors'
 // ── Config ────────────────────────────────────────────────────────────────────
 
 const CONFIG = {
-  maxTtl: 259200,
+  maxTtl: 604800,
   defaultTtl: 86400,
   maxAttempts: 3,
   maxStorage: 9 * 1024 * 1024 * 1024,
