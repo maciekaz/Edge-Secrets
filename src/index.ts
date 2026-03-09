@@ -1,5 +1,6 @@
-import { Hono, type Context } from 'hono'
+import { Hono, type Context, type MiddlewareHandler } from 'hono'
 import { cors } from 'hono/cors'
+import { getCookie } from 'hono/cookie'
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -57,6 +58,8 @@ type Bindings = {
   BUCKET: R2Bucket
   SECRETS_STORE: KVNamespace
   PEPPER: string
+  CF_TEAM_DOMAIN: string
+  CF_AUD: string
 }
 
 type Lang = (typeof I18N)['pl'] | (typeof I18N)['en']
@@ -150,6 +153,102 @@ function encodeFilename(filename: string): string {
   return `UTF-8''${encodeURIComponent(filename)}`
 }
 
+// ── CF Access JWT Verification ────────────────────────────────────────────────
+
+interface JWK {
+  kid: string
+  kty: string
+  alg: string
+  use: string
+  n: string
+  e: string
+}
+
+// Module-level key cache — valid for the lifetime of the isolate (~few hours)
+const _keyCache = new Map<string, CryptoKey>()
+let _keysFetchedAt = 0
+const KEYS_TTL_MS = 3_600_000 // 1 hour
+
+function b64urlDecode(s: string): Uint8Array {
+  const b64 = s.replace(/-/g, '+').replace(/_/g, '/')
+  const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4)
+  return Uint8Array.from(atob(padded), (c) => c.charCodeAt(0))
+}
+
+async function refreshKeys(teamDomain: string): Promise<void> {
+  const res = await fetch(`https://${teamDomain}/cdn-cgi/access/certs`)
+  if (!res.ok) throw new Error('Failed to fetch CF Access JWKS')
+  const { keys } = (await res.json()) as { keys: JWK[] }
+  _keyCache.clear()
+  for (const jwk of keys) {
+    const key = await crypto.subtle.importKey(
+      'jwk',
+      jwk,
+      { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+      false,
+      ['verify']
+    )
+    _keyCache.set(jwk.kid, key)
+  }
+  _keysFetchedAt = Date.now()
+}
+
+async function verifyAccessJWT(token: string, teamDomain: string, aud: string): Promise<boolean> {
+  try {
+    const parts = token.split('.')
+    if (parts.length !== 3) return false
+    const [headerB64, payloadB64, sigB64] = parts as [string, string, string]
+
+    const header = JSON.parse(new TextDecoder().decode(b64urlDecode(headerB64))) as { kid: string }
+
+    // Refresh key cache if stale or kid not found
+    if (Date.now() - _keysFetchedAt > KEYS_TTL_MS || !_keyCache.has(header.kid)) {
+      await refreshKeys(teamDomain)
+    }
+
+    const key = _keyCache.get(header.kid)
+    if (!key) return false
+
+    const valid = await crypto.subtle.verify(
+      'RSASSA-PKCS1-v1_5',
+      key,
+      b64urlDecode(sigB64),
+      new TextEncoder().encode(`${headerB64}.${payloadB64}`)
+    )
+    if (!valid) return false
+
+    const payload = JSON.parse(new TextDecoder().decode(b64urlDecode(payloadB64))) as {
+      aud: string | string[]
+      exp: number
+      iss: string
+    }
+
+    // Verify expiry
+    if (payload.exp < Math.floor(Date.now() / 1000)) return false
+
+    // Verify audience matches this application
+    const audiences = Array.isArray(payload.aud) ? payload.aud : [payload.aud]
+    if (!audiences.includes(aud)) return false
+
+    return true
+  } catch {
+    return false
+  }
+}
+
+const requireAccess: MiddlewareHandler<{ Bindings: Bindings }> = async (c, next) => {
+  const token =
+    c.req.header('Cf-Access-Jwt-Assertion') ??
+    getCookie(c, 'CF_Authorization')
+
+  if (!token) return c.text('Unauthorized', 401)
+
+  const valid = await verifyAccessJWT(token, c.env.CF_TEAM_DOMAIN, c.env.CF_AUD)
+  if (!valid) return c.text('Unauthorized', 401)
+
+  return next()
+}
+
 // ── Hono App ──────────────────────────────────────────────────────────────────
 
 const app = new Hono<{ Bindings: Bindings }>()
@@ -166,13 +265,19 @@ app.use(
 
 // Bindings guard — fail fast if Cloudflare bindings are not attached
 app.use('*', async (c, next) => {
-  if (!c.env.DB || !c.env.BUCKET || !c.env.SECRETS_STORE || !c.env.PEPPER) {
-    return c.text('System Error: Missing Bindings (DB/BUCKET/KV/PEPPER)', 500)
+  if (!c.env.DB || !c.env.BUCKET || !c.env.SECRETS_STORE || !c.env.PEPPER || !c.env.CF_TEAM_DOMAIN || !c.env.CF_AUD) {
+    return c.text('System Error: Missing Bindings', 500)
   }
   return next()
 })
 
 // ── Routes ────────────────────────────────────────────────────────────────────
+
+// CF Access JWT guard on all write/admin endpoints
+app.use('/gen', requireAccess)
+app.use('/api/store', requireAccess)
+app.use('/api/stats', requireAccess)
+app.use('/api/upload/*', requireAccess)
 
 app.get('/', (c) => c.redirect('/gen', 302))
 
