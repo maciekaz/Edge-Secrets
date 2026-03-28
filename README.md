@@ -12,40 +12,21 @@ Encryption happens **entirely in the browser**. The server never sees plaintext 
 
 ```mermaid
 sequenceDiagram
-    participant S as Sender (Browser)
-    participant W as Worker
-    participant KV as KV Store
-    participant R as Recipient (Browser)
+    participant S as Sender
+    participant Server
+    participant R as Recipient
 
-    Note over S: Enter content + passphrase
-    S->>S: id = randomUUID()
-    S->>S: key = PBKDF2(passphrase, id, 100k iter) → AES-256-GCM key
-    S->>S: verifier = PBKDF2(passphrase, id+"_v", 50k iter)
-    S->>S: {iv, encryptedData} = AES-GCM.encrypt(content, key)
+    S->>S: encrypt(content, passphrase) → ciphertext
+    S->>Server: store ciphertext + verifier hash
+    S-->>R: /receive/{id}#passphrase
 
-    S->>W: POST /api/store {id, encryptedData, verifier, ttl}
-    W->>KV: put(id, encryptedData, {verifier, attempts:0}, ttl≤7d)
-    W-->>S: {success: true}
+    Note over Server,R: passphrase is in the URL hash — browsers never send it to the server
 
-    S-->>R: /receive/{id}#{passphrase}  ← shared out-of-band
+    R->>Server: retrieve (verifier hash only)
+    Server->>Server: verify → delete (burn on read)
+    Server-->>R: ciphertext only
 
-    Note over R: passphrase extracted from URL hash (never sent to server)
-    R->>R: verifierCandidate = PBKDF2(passphrase, id+"_v", 50k iter)
-    R->>W: POST /api/retrieve/{id} {verifierCandidate}
-    W->>KV: getWithMetadata(id)
-    KV-->>W: {encryptedData, metadata: {verifier, attempts}}
-    W->>W: safeCompare(verifier, verifierCandidate)
-
-    alt wrong passphrase
-        W->>KV: put(id, ..., {attempts: attempts+1})
-        W-->>R: 403 RETRY_N (or 410 TERMINATED after 3 attempts + delete)
-    else correct passphrase
-        W->>KV: delete(id)  ← burn on read
-        W-->>R: {encryptedData}
-        R->>R: key = PBKDF2(passphrase, id, 100k iter)
-        R->>R: content = AES-GCM.decrypt(encryptedData, key)
-        Note over R: Display → auto-wipe after 5 min
-    end
+    R->>R: decrypt(ciphertext, passphrase from URL hash)
 ```
 
 **What the server knows:** encrypted bytes + a password verification hash.
@@ -66,71 +47,17 @@ sequenceDiagram
 
 Files are **not client-side encrypted** — they go directly to R2. Protection is enforced through:
 
-**Upload (3-step multipart):**
-
 ```mermaid
-sequenceDiagram
-    participant U as Uploader (Browser)
-    participant W as Worker
-    participant D1 as D1 (metadata)
-    participant R2 as R2 (binary)
+flowchart LR
+    U([Uploader]) -->|file + password + TTL + limit| W[Worker]
+    W -->|binary| R2[(R2)]
+    W -->|metadata + SHA-256 password hash| D1[(D1)]
+    W -->|share link| U
 
-    U->>W: POST /api/upload/init {filename, size, password, ttl, limit}
-    W->>W: safeTtl = min(ttl, 7 days)
-    W->>W: password_hash = SHA-256(password + PEPPER)
-    W->>D1: INSERT files (id, filename, size, expires_at, password_hash, max_downloads, status="pending")
-    W->>R2: createMultipartUpload(id) → uploadId
-    W-->>U: {key, uploadId, fileId}
-
-    loop each 50 MB chunk · up to 4 parallel
-        U->>W: PUT /api/upload/part?key&id&num + binary chunk
-        W->>R2: uploadPart(num, chunk) → partInfo
-        W-->>U: partInfo
-    end
-
-    U->>W: POST /api/upload/complete {key, uploadId, parts, fileId}
-    W->>R2: completeMultipartUpload(parts)
-    W->>D1: UPDATE files SET status="ready"
-    W-->>U: {ok: true}
-
-    Note over U: Share link: /share/{fileId} or /share/{fileId}?pwd=password
-```
-
-**Download:**
-
-```mermaid
-sequenceDiagram
-    participant R as Recipient
-    participant W as Worker
-    participant D1 as D1
-    participant R2 as R2
-
-    R->>W: GET /share/{id}[?pwd=password]
-    W->>D1: SELECT * FROM files WHERE id=?
-    D1-->>W: FileRecord
-
-    alt expired or status="downloaded"
-        W-->>R: 410 LINK_EXPIRED
-    else password set, no ?pwd param
-        W-->>R: 200 Password entry page
-    else wrong password
-        W->>D1: UPDATE failed_attempts++
-        alt failed_attempts >= 3
-            W->>D1: DELETE file record
-            W->>R2: delete(id)
-            W-->>R: 410 FILE_DELETED
-        else
-            W-->>R: 403 INVALID_PASSWORD (remaining attempts)
-        end
-    else correct password (or no password)
-        W->>D1: UPDATE download_count++
-        alt download_count >= max_downloads
-            W->>D1: UPDATE status="downloaded"
-            W-)R2: delete(id)  [async, waitUntil]
-        end
-        W->>R2: get(id) → stream
-        W-->>R: file stream (Content-Disposition: attachment)
-    end
+    R([Recipient]) -->|GET /share/id| W
+    W -->|check password · TTL · download limit| W
+    W -->|file stream| R
+    W -.->|burn when limit reached| R2
 ```
 
 - Optional password (`SHA-256(password + PEPPER)` — verified server-side)
