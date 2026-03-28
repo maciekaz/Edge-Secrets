@@ -12,26 +12,40 @@ Encryption happens **entirely in the browser**. The server never sees plaintext 
 
 ```mermaid
 sequenceDiagram
-    participant S as Sender
-    participant K as KV Store
-    participant R as Recipient
+    participant S as Sender (Browser)
+    participant W as Worker
+    participant KV as KV Store
+    participant R as Recipient (Browser)
 
-    S->>S: Enter content + passphrase
-    S->>S: PBKDF2(passphrase, id, 100k iter) → AES-256-GCM key
-    S->>S: AES-GCM.encrypt(content) → ciphertext
-    S->>S: PBKDF2(passphrase, id+"_v", 50k iter) → verifier
+    Note over S: Enter content + passphrase
+    S->>S: id = randomUUID()
+    S->>S: key = PBKDF2(passphrase, id, 100k iter) → AES-256-GCM key
+    S->>S: verifier = PBKDF2(passphrase, id+"_v", 50k iter)
+    S->>S: {iv, encryptedData} = AES-GCM.encrypt(content, key)
 
-    S->>K: POST /api/store { id, ciphertext, verifier }
-    K->>K: Store ciphertext + verifier
+    S->>W: POST /api/store {id, encryptedData, verifier, ttl}
+    W->>KV: put(id, encryptedData, {verifier, attempts:0}, ttl≤7d)
+    W-->>S: {success: true}
 
-    S-->>R: Share link: /receive/{id}#{passphrase}
+    S-->>R: /receive/{id}#{passphrase}  ← shared out-of-band
 
-    R->>K: POST /api/retrieve { verifier }
-    K->>K: Validate verifier → delete from KV (burn)
-    K->>R: Return ciphertext
+    Note over R: passphrase extracted from URL hash (never sent to server)
+    R->>R: verifierCandidate = PBKDF2(passphrase, id+"_v", 50k iter)
+    R->>W: POST /api/retrieve/{id} {verifierCandidate}
+    W->>KV: getWithMetadata(id)
+    KV-->>W: {encryptedData, metadata: {verifier, attempts}}
+    W->>W: safeCompare(verifier, verifierCandidate)
 
-    R->>R: AES-GCM.decrypt(key from #hash) → plaintext
-    R->>R: Display content (auto-wipe after 5 min)
+    alt wrong passphrase
+        W->>KV: put(id, ..., {attempts: attempts+1})
+        W-->>R: 403 RETRY_N (or 410 TERMINATED after 3 attempts + delete)
+    else correct passphrase
+        W->>KV: delete(id)  ← burn on read
+        W-->>R: {encryptedData}
+        R->>R: key = PBKDF2(passphrase, id, 100k iter)
+        R->>R: content = AES-GCM.decrypt(encryptedData, key)
+        Note over R: Display → auto-wipe after 5 min
+    end
 ```
 
 **What the server knows:** encrypted bytes + a password verification hash.
@@ -52,23 +66,71 @@ sequenceDiagram
 
 Files are **not client-side encrypted** — they go directly to R2. Protection is enforced through:
 
-```mermaid
-flowchart LR
-    U([Uploader]) -->|multipart upload| W[Worker]
-    W -->|store binary| R2[(R2 Bucket)]
-    W -->|store metadata| D1[(D1 Database)]
+**Upload (3-step multipart):**
 
-    subgraph Server-side controls
-        PW[Optional password\nSHA-256 + PEPPER]
-        DL[Download limit\n1× / 5× / unlimited]
-        TTL[TTL cap\nmax 7 days]
-        BL[Brute-force block\n3 failed attempts → delete]
+```mermaid
+sequenceDiagram
+    participant U as Uploader (Browser)
+    participant W as Worker
+    participant D1 as D1 (metadata)
+    participant R2 as R2 (binary)
+
+    U->>W: POST /api/upload/init {filename, size, password, ttl, limit}
+    W->>W: safeTtl = min(ttl, 7 days)
+    W->>W: password_hash = SHA-256(password + PEPPER)
+    W->>D1: INSERT files (id, filename, size, expires_at, password_hash, max_downloads, status="pending")
+    W->>R2: createMultipartUpload(id) → uploadId
+    W-->>U: {key, uploadId, fileId}
+
+    loop each 50 MB chunk · up to 4 parallel
+        U->>W: PUT /api/upload/part?key&id&num + binary chunk
+        W->>R2: uploadPart(num, chunk) → partInfo
+        W-->>U: partInfo
     end
 
-    W --- PW & DL & TTL & BL
+    U->>W: POST /api/upload/complete {key, uploadId, parts, fileId}
+    W->>R2: completeMultipartUpload(parts)
+    W->>D1: UPDATE files SET status="ready"
+    W-->>U: {ok: true}
 
-    RCP([Recipient]) -->|GET /share/:id| W
-    W -->|stream file| RCP
+    Note over U: Share link: /share/{fileId} or /share/{fileId}?pwd=password
+```
+
+**Download:**
+
+```mermaid
+sequenceDiagram
+    participant R as Recipient
+    participant W as Worker
+    participant D1 as D1
+    participant R2 as R2
+
+    R->>W: GET /share/{id}[?pwd=password]
+    W->>D1: SELECT * FROM files WHERE id=?
+    D1-->>W: FileRecord
+
+    alt expired or status="downloaded"
+        W-->>R: 410 LINK_EXPIRED
+    else password set, no ?pwd param
+        W-->>R: 200 Password entry page
+    else wrong password
+        W->>D1: UPDATE failed_attempts++
+        alt failed_attempts >= 3
+            W->>D1: DELETE file record
+            W->>R2: delete(id)
+            W-->>R: 410 FILE_DELETED
+        else
+            W-->>R: 403 INVALID_PASSWORD (remaining attempts)
+        end
+    else correct password (or no password)
+        W->>D1: UPDATE download_count++
+        alt download_count >= max_downloads
+            W->>D1: UPDATE status="downloaded"
+            W-)R2: delete(id)  [async, waitUntil]
+        end
+        W->>R2: get(id) → stream
+        W-->>R: file stream (Content-Disposition: attachment)
+    end
 ```
 
 - Optional password (`SHA-256(password + PEPPER)` — verified server-side)
@@ -112,10 +174,12 @@ The Worker refuses to start if `PEPPER` is not set (`bindings guard`).
 
 ```mermaid
 flowchart TD
-    Browser -->|HTTPS| CFA[Cloudflare Access]
-    CFA -->|JWT-verified request| Worker[Cloudflare Worker\nHono / TypeScript]
+    Browser -->|protected routes\n/gen, /api/store\n/api/stats, /api/upload/*| CFA[Cloudflare Access\nJWT RS256 verification]
+    Browser -->|public routes\n/receive/:id, /share/:id\n/api/retrieve/:id| Worker
 
-    Worker --> KV[(KV Store\nEncrypted secrets)]
+    CFA -->|verified request| Worker[Cloudflare Worker\nHono / TypeScript]
+
+    Worker --> KV[(KV Store\nEncrypted text secrets)]
     Worker --> D1[(D1 Database\nFile metadata)]
     Worker --> R2[(R2 Bucket\nFile binaries)]
 ```
