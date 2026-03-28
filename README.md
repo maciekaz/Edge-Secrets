@@ -1,119 +1,130 @@
-# INS Secrets
+# Edge Secrets
 
-Bezpieczne udostępnianie haseł i plików — zbudowane na Cloudflare Workers.
+Secure, one-time sharing of passwords and files — built on Cloudflare Workers.
 
-## Jak to działa
+---
 
-### Sekrety tekstowe (hasła, dane dostępowe)
+## How It Works
 
-Szyfrowanie odbywa się **wyłącznie w przeglądarce**. Serwer nigdy nie widzi danych w postaci jawnej ani klucza szyfrującego.
+### Text Secrets (passwords, credentials)
 
+Encryption happens **entirely in the browser**. The server never sees plaintext data or the encryption key.
+
+```mermaid
+sequenceDiagram
+    participant S as Sender
+    participant K as KV Store
+    participant R as Recipient
+
+    S->>S: Enter content + passphrase
+    S->>S: PBKDF2(passphrase, id, 100k iter) → AES-256-GCM key
+    S->>S: AES-GCM.encrypt(content) → ciphertext
+    S->>S: PBKDF2(passphrase, id+"_v", 50k iter) → verifier
+
+    S->>K: POST /api/store { id, ciphertext, verifier }
+    K->>K: Store ciphertext + verifier
+
+    S-->>R: Share link: /receive/{id}#{passphrase}
+
+    R->>K: POST /api/retrieve { verifier }
+    K->>K: Validate verifier → delete from KV (burn)
+    K->>R: Return ciphertext
+
+    R->>R: AES-GCM.decrypt(key from #hash) → plaintext
+    R->>R: Display content (auto-wipe after 5 min)
 ```
-[Nadawca]                          [Serwer / KV]              [Odbiorca]
-    │                                    │                         │
-    ├─ wpisuje treść + hasło             │                         │
-    ├─ PBKDF2(hasło, id, 100k iter)      │                         │
-    │   → klucz AES-256-GCM             │                         │
-    ├─ AES-GCM.encrypt(treść)           │                         │
-    ├─ PBKDF2(hasło, id+"_v", 50k iter) │                         │
-    │   → verifier (odcisk hasła)       │                         │
-    ├─── POST /api/store ───────────────►│                         │
-    │   { id, encryptedData, verifier } │                         │
-    │                                   │ przechowuje             │
-    │                                   │ szyfrogram + verifier   │
-    ├─ generuje link: /receive/{id}#{hasło}                        │
-    │                                   │                         │
-    │                              [link do odbiorcy]             │
-    │                                   │                         │
-    │                                   │◄── POST /api/retrieve ──┤
-    │                                   │    { verifier }         │
-    │                                   ├─ sprawdza verifier      │
-    │                                   ├─ usuwa z KV (burn)      │
-    │                                   ├───── { encryptedData } ►│
-    │                                   │                         ├─ AES-GCM.decrypt(klucz z #hash)
-    │                                   │                         ├─ wyświetla treść
-    │                                   │                         └─ auto-kasuje po 5 min
-```
 
-**Co wie serwer:** zaszyfrowany ciąg bajtów + hash weryfikacyjny hasła.
-**Czego serwer nie wie:** treści sekretu, klucza szyfrującego, samego hasła.
+**What the server knows:** encrypted bytes + a password verification hash.
+**What the server never knows:** the content, the encryption key, or the passphrase itself.
 
-#### Szczegóły kryptografii
+#### Cryptography Details
 
-| Element | Algorytm | Parametry |
+| Element | Algorithm | Parameters |
 |---|---|---|
-| Wyprowadzanie klucza | PBKDF2 | SHA-256, 100 000 iteracji |
-| Szyfrowanie | AES-GCM | 256-bit, losowe IV (12B) |
-| Weryfikator hasła | PBKDF2 | SHA-256, 50 000 iteracji, sól `id + "_v"` |
-| Entropia linku z hasłem | Klucz 20 znaków z alfabetu 58 znaków | ~118 bitów |
+| Key derivation | PBKDF2 | SHA-256, 100,000 iterations |
+| Encryption | AES-GCM | 256-bit, random IV (12 B) |
+| Password verifier | PBKDF2 | SHA-256, 50,000 iterations, salt `id + "_v"` |
+| Link entropy (with passphrase) | 20-char key, 58-char alphabet | ~118 bits |
 
 ---
 
-### Pliki
+### Files
 
-Pliki **nie są szyfrowane po stronie klienta** — trafiają bezpośrednio do R2. Ochrona odbywa się przez:
+Files are **not client-side encrypted** — they go directly to R2. Protection is enforced through:
 
-- opcjonalne hasło (`SHA-256(hasło + PEPPER)` weryfikowane server-side)
-- limit pobrań (1 raz, 5 razy lub bez limitu)
-- TTL wymuszony server-side — maksymalnie 72h niezależnie od wartości z frontendu
-- automatyczne usunięcie po wygaśnięciu (cron co godzinę)
-- blokada po 3 błędnych hasłach → plik usuwany natychmiast
+```mermaid
+flowchart LR
+    U([Uploader]) -->|multipart upload| W[Worker]
+    W -->|store binary| R2[(R2 Bucket)]
+    W -->|store metadata| D1[(D1 Database)]
 
-#### Hashowanie hasła pliku — Global Pepper
+    subgraph Server-side controls
+        PW[Optional password\nSHA-256 + PEPPER]
+        DL[Download limit\n1× / 5× / unlimited]
+        TTL[TTL cap\nmax 7 days]
+        BL[Brute-force block\n3 failed attempts → delete]
+    end
 
-Hasła do plików są hashowane jako `SHA-256(hasło + PEPPER)`, gdzie `PEPPER` to globalny sekret przechowywany jako Cloudflare Secret (nie w kodzie, nie w repozytorium). Oznacza to, że nawet w przypadku wycieku bazy danych D1 hasze haseł są bezużyteczne bez znajomości peppera.
+    W --- PW & DL & TTL & BL
 
-```
-hasło użytkownika  ──┐
-                     ├─► SHA-256 ──► hash w D1
-PEPPER (CF Secret) ──┘
-```
-
-Worker nie wystartuje jeśli `PEPPER` nie jest ustawiony (`bindings guard`).
-
-#### Limit TTL plików
-
-Backend wymusza maksymalny czas życia pliku równy `CONFIG.maxTtl` (7dni), niezależnie od wartości przysłanej przez klienta:
-
-```
-safeTtl = Math.min(ttl_z_frontendu, CONFIG.maxTtl * 1000)
+    RCP([Recipient]) -->|GET /share/:id| W
+    W -->|stream file| RCP
 ```
 
-Identyczna logika jak przy sekretach tekstowych w KV.
+- Optional password (`SHA-256(password + PEPPER)` — verified server-side)
+- Download limit (1×, 5×, or unlimited)
+- Server-enforced TTL — maximum 7 days regardless of what the client sends
+- Automatic deletion on expiry (hourly cron)
+- Lockout after 3 failed password attempts → file deleted immediately
+
+#### Global Pepper
+
+File passwords are hashed as `SHA-256(password + PEPPER)`, where `PEPPER` is a global secret stored as a Cloudflare Secret (not in code, not in the repo). Even if the D1 database leaks, the password hashes are useless without the pepper.
+
+```mermaid
+flowchart LR
+    P[User password] --> H[SHA-256]
+    K[PEPPER\nCloudflare Secret] --> H
+    H --> DB[(Hash stored in D1)]
+```
+
+The Worker refuses to start if `PEPPER` is not set (`bindings guard`).
 
 ---
 
-## Zabezpieczenia
+## Security
 
-- **Burn-on-read** — sekret kasowany z KV po pierwszym poprawnym odczycie
-- **Rate limiting hasła** — max 3 próby, potem trwałe usunięcie (dotyczy zarówno sekretów jak i plików)
-- **Global Pepper** — hasła do plików hashowane z globalnym sekretem (`PEPPER`) z Cloudflare Secrets; wyciek D1 nie kompromituje haseł
-- **TTL cap server-side** — maksymalny czas życia pliku wymuszany przez backend (72h), frontend nie może go przekroczyć
-- **CF Access + weryfikacja JWT w kodzie** — endpointy tworzenia (`/gen`, `/api/store`, `/api/upload`, `/api/stats`) blokowane dwuwarstwowo: najpierw przez Cloudflare Access policy, następnie Worker weryfikuje podpis JWT (RS256) bezpośrednio w kodzie. Worker pobiera klucze publiczne z JWKS endpoint (`/cdn-cgi/access/certs`) i cachuje je in-isolate przez 1h
-- **Security headers** — CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy
-- **RFC 5987** — bezpieczne kodowanie nazw plików w nagłówku `Content-Disposition`
-- **Brak logowania treści** — błędy zwracają generyczne komunikaty (bez `e.message`)
-- **Bindings guard** — worker zwraca 500 przy starcie jeśli brakuje któregokolwiek z wymaganych bindingów (DB, BUCKET, KV, PEPPER, CF_TEAM_DOMAIN, CF_AUD)
-
----
-
-## Architektura
-
-```
-Browser ──► Cloudflare Access ──► Cloudflare Worker (Hono / TypeScript)
-                                        │
-                              ┌─────────┼──────────┐
-                              ▼         ▼          ▼
-                          KV Store    D1 DB      R2 Bucket
-                         (sekrety)  (metadane   (pliki)
-                                     plików)
-```
-
-| Zasób | Zastosowanie |
+| Measure | Description |
 |---|---|
-| **KV** (`SECRETS_STORE`) | Zaszyfrowane sekrety tekstowe + verifier, TTL 1–72h |
-| **D1** (`DB`) | Metadane plików (nazwa, rozmiar, TTL, licznik pobrań, hash hasła) |
-| **R2** (`BUCKET`) | Binarne dane plików, multipart upload do 5 GB |
+| **Burn-on-read** | Secret deleted from KV on first successful retrieval |
+| **Rate limiting** | Max 3 attempts; permanent deletion on lockout (secrets & files) |
+| **Global Pepper** | File password hashes include a server-side secret; D1 leak doesn't compromise passwords |
+| **Server-side TTL cap** | Backend enforces maximum lifetime; client cannot exceed it |
+| **CF Access + JWT verification** | Protected endpoints guarded at two layers: Cloudflare Access policy + in-Worker RS256 JWT verification against JWKS endpoint (cached 1 h) |
+| **Security headers** | CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy |
+| **RFC 5987 filenames** | Safe percent-encoded `Content-Disposition` filenames (no header injection) |
+| **No content logging** | Errors return generic messages — no `e.message` leakage |
+| **Bindings guard** | Worker returns 500 on startup if any required binding is missing (DB, BUCKET, KV, PEPPER, CF_TEAM_DOMAIN, CF_AUD) |
+
+---
+
+## Architecture
+
+```mermaid
+flowchart TD
+    Browser -->|HTTPS| CFA[Cloudflare Access]
+    CFA -->|JWT-verified request| Worker[Cloudflare Worker\nHono / TypeScript]
+
+    Worker --> KV[(KV Store\nEncrypted secrets)]
+    Worker --> D1[(D1 Database\nFile metadata)]
+    Worker --> R2[(R2 Bucket\nFile binaries)]
+```
+
+| Resource | Usage |
+|---|---|
+| **KV** (`SECRETS_STORE`) | Encrypted text secrets + verifier, TTL 1–72 h |
+| **D1** (`DB`) | File metadata (name, size, TTL, download count, password hash) |
+| **R2** (`BUCKET`) | Raw file data, multipart upload up to 5 GB |
 
 ---
 
@@ -121,8 +132,27 @@ Browser ──► Cloudflare Access ──► Cloudflare Worker (Hono / TypeScri
 
 - **Runtime:** Cloudflare Workers
 - **Framework:** [Hono](https://hono.dev) v4
-- **Język:** TypeScript (strict)
-- **Narzędzie deploy:** Wrangler v4
+- **Language:** TypeScript (strict)
+- **Deploy tool:** Wrangler v4
+
+---
+
+## API Endpoints
+
+| Method | Path | Description | Access |
+|---|---|---|---|
+| `GET` | `/gen` | Secret & upload creation panel | 🔒 CF Access |
+| `POST` | `/api/store` | Save encrypted secret to KV | 🔒 CF Access |
+| `POST` | `/api/retrieve/:id` | Retrieve and burn secret | Public |
+| `GET` | `/receive/:id` | Secret retrieval page | Public |
+| `GET` | `/api/stats` | Storage statistics | 🔒 CF Access |
+| `POST` | `/api/upload/init` | Initiate multipart upload | 🔒 CF Access |
+| `PUT` | `/api/upload/part` | Upload file part | 🔒 CF Access |
+| `POST` | `/api/upload/complete` | Finalize upload | 🔒 CF Access |
+| `GET` | `/share/:id` | Download file | Public |
+| `DELETE` | `/api/del/:id` | Delete file | Public* |
+
+> *`/api/del` is intentionally outside CF Access.
 
 ---
 
@@ -130,12 +160,10 @@ Browser ──► Cloudflare Access ──► Cloudflare Worker (Hono / TypeScri
 
 ```bash
 npm install
-
-# Uzupełnij wrangler.toml rzeczywistymi ID bindingów, następnie:
 npx wrangler deploy
 ```
 
-### Wymagane bindingi w `wrangler.toml`
+### Required `wrangler.toml` Bindings
 
 ```toml
 [[kv_namespaces]]
@@ -152,58 +180,39 @@ binding = "BUCKET"
 bucket_name = "<R2_BUCKET_NAME>"
 ```
 
-### Wymagane sekrety (Cloudflare Secrets)
+### Required Cloudflare Secrets
 
-Żaden z poniższych nie trafia do repozytorium ani `wrangler.toml`. Worker nie wystartuje bez wszystkich trzech.
+None of these go into the repo or `wrangler.toml`. The Worker won't start without all three.
 
 ```bash
-# 1. Globalny pepper dla haszy haseł plików
+# 1. Global pepper for file password hashes
 openssl rand -base64 32
 npx wrangler secret put PEPPER
 
-# 2. Domena zespołu Cloudflare Access
+# 2. Cloudflare Access team domain
 npx wrangler secret put CF_TEAM_DOMAIN
-# → np. yourteam.cloudflareaccess.com
+# → e.g. yourteam.cloudflareaccess.com
 
 # 3. Application Audience (AUD) tag
-# Znajdziesz go w: CF Zero Trust → Access → Applications → (aplikacja) → Overview → AUD Tag
+# Found at: CF Zero Trust → Access → Applications → (app) → Overview → AUD Tag
 npx wrangler secret put CF_AUD
 ```
 
-> **Ważne:** `CF_AUD` jest unikalny dla każdej aplikacji CF Access. Bez niego weryfikacja JWT zawsze zwróci 401. Upewnij się też, że w CF Zero Trust masz skonfigurowaną **Access Policy** dla odpowiednich ścieżek (`/gen`, `/api/store`, `/api/stats`, `/api/upload`).
+> **Note:** `CF_AUD` is unique per CF Access application. Without it, JWT verification always returns 401. Make sure you also have an **Access Policy** configured in CF Zero Trust for the protected paths (`/gen`, `/api/store`, `/api/stats`, `/api/upload`).
 
-### Lokalny development
+### Local Development
 
-Utwórz plik `.dev.vars` (ignorowany przez git):
+Create a `.dev.vars` file (git-ignored):
 
 ```ini
-PEPPER=lokalny-pepper-tylko-do-testow
+PEPPER=local-pepper-for-testing-only
 CF_TEAM_DOMAIN=yourteam.cloudflareaccess.com
-CF_AUD=twoj-aud-tag
+CF_AUD=your-aud-tag
 ```
 
-> W lokalnym dev żądania nie przechodzą przez CF Access, więc chronione endpointy wymagają ręcznego przekazania tokenu JWT w nagłówku `Cf-Access-Jwt-Assertion`.
+> In local dev, requests don't go through CF Access — protected endpoints require a JWT passed manually via the `Cf-Access-Jwt-Assertion` header.
 
 ```bash
 npx wrangler dev
 # → http://localhost:8787
 ```
-
----
-
-## Endpointy
-
-| Metoda | Ścieżka | Opis | Dostęp |
-|---|---|---|---|
-| `GET` | `/gen` | Panel tworzenia sekretów i uploadów | 🔒 CF Access |
-| `POST` | `/api/store` | Zapis zaszyfrowanego sekretu do KV | 🔒 CF Access |
-| `POST` | `/api/retrieve/:id` | Odczyt i burn sekretu | Publiczny |
-| `GET` | `/receive/:id` | Strona odbioru sekretu | Publiczny |
-| `GET` | `/api/stats` | Statystyki storage | 🔒 CF Access |
-| `POST` | `/api/upload/init` | Inicjacja multipart upload | 🔒 CF Access |
-| `PUT` | `/api/upload/part` | Upload części pliku | 🔒 CF Access |
-| `POST` | `/api/upload/complete` | Finalizacja uploadu | 🔒 CF Access |
-| `GET` | `/share/:id` | Pobranie pliku | Publiczny |
-| `DELETE` | `/api/del/:id` | Usunięcie pliku | Publiczny* |
-
-> *`/api/del` nie jest objęty CF Access — świadoma decyzja projektowa.
