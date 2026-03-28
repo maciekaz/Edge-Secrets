@@ -9,7 +9,8 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "hono": "^4.6.0"
+    "hono": "^4.6.0",
+    "qrcode-generator": "^2.0.4"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20241022.0",

@@ -1,6 +1,18 @@
 # Edge Secrets
 
-Secure, one-time sharing of passwords and files — built on Cloudflare Workers.
+Secure, one-time sharing of passwords, files and links — built on Cloudflare Workers.
+
+## Features
+
+| Feature | Details |
+|---|---|
+| **Text secrets** | Zero-knowledge credential sharing — AES-256-GCM, passphrase in URL hash, burn-on-read |
+| **File sharing** | Up to 5 GB via R2, optional password, download limit, server-enforced TTL |
+| **URL shortener** | Short links with TTL and click limit, SSRF-safe |
+| **Appearance editor** | Accent colour, background colour, brand name, tagline, logo — all globally persistent |
+| **Dark / light mode** | System-detected per client, manually overridable |
+| **QR codes** | Server-rendered SVG QR on every output link — scan directly from desktop |
+| **CF Access** | All write/admin endpoints protected by Cloudflare Access + RS256 JWT verification |
 
 ---
 
@@ -101,8 +113,8 @@ The Worker refuses to start if `PEPPER` is not set (`bindings guard`).
 
 ```mermaid
 flowchart TD
-    Browser -->|protected routes\n/gen, /api/store\n/api/stats, /api/upload/*| CFA[Cloudflare Access\nJWT RS256 verification]
-    Browser -->|public routes\n/receive/:id, /share/:id\n/api/retrieve/:id| Worker
+    Browser -->|protected routes\n/gen, /api/store\n/api/stats, /api/upload/*\n/api/ui/config POST| CFA[Cloudflare Access\nJWT RS256 verification]
+    Browser -->|public routes\n/receive/:id, /share/:id\n/api/retrieve/:id\n/ui/config, /ui/logo| Worker
 
     CFA -->|verified request| Worker[Cloudflare Worker\nHono / TypeScript]
 
@@ -113,9 +125,9 @@ flowchart TD
 
 | Resource | Usage |
 |---|---|
-| **KV** (`SECRETS_STORE`) | Encrypted text secrets + verifier, TTL 1–72 h |
+| **KV** (`SECRETS_STORE`) | Encrypted text secrets + verifier, short links, global UI config (accent, bg, brand, tagline) |
 | **D1** (`DB`) | File metadata (name, size, TTL, download count, password hash) |
-| **R2** (`BUCKET`) | Raw file data, multipart upload up to 5 GB |
+| **R2** (`BUCKET`) | Raw file data (multipart upload up to 5 GB) + logo image |
 
 ---
 
@@ -125,6 +137,7 @@ flowchart TD
 - **Framework:** [Hono](https://hono.dev) v4
 - **Language:** TypeScript (strict)
 - **Deploy tool:** Wrangler v4
+- **QR codes:** [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) — server-side SVG rendering
 
 ---
 
@@ -142,8 +155,17 @@ flowchart TD
 | `POST` | `/api/upload/complete` | Finalize upload | 🔒 CF Access |
 | `GET` | `/share/:id` | Download file | Public |
 | `DELETE` | `/api/del/:id` | Delete file | Public* |
+| `POST` | `/api/shorten` | Create short link (TTL + click limit) | 🔒 CF Access |
+| `GET` | `/s/:id` | Redirect to target URL | Public |
+| `GET` | `/ui/config` | Read global UI settings (accent, bg, brand, tagline) | Public |
+| `POST` | `/api/ui/config` | Update global UI settings | 🔒 CF Access |
+| `GET` | `/ui/logo` | Serve logo image from R2 | Public |
+| `POST` | `/api/ui/logo` | Upload logo (PNG/SVG/WebP, max 256 KB) | 🔒 CF Access |
+| `DELETE` | `/api/ui/logo` | Remove logo | 🔒 CF Access |
+| `GET` | `/ui/qr` | Generate QR code SVG for a given URL (`?d=encodedUrl`) | Public |
 
 > *`/api/del` is intentionally outside CF Access.
+> `/ui/config` and `/ui/logo` (GET) live outside `/api/` so CF Access policies don't block public clients. Write operations (`POST /api/ui/*`, `DELETE /api/ui/*`) remain protected.
 
 ---
 
@@ -216,7 +238,7 @@ npx wrangler secret put CF_TEAM_DOMAIN
 npx wrangler secret put CF_AUD
 ```
 
-> Make sure you have a CF Zero Trust **Access Policy** configured for the protected paths: `/gen`, `/api/store`, `/api/stats`, `/api/upload`.
+> Make sure you have a CF Zero Trust **Access Policy** configured for the protected paths: `/gen`, `/api/store`, `/api/stats`, `/api/upload`, `/api/shorten`, `/api/ui/config`, `/api/ui/logo`. Do **not** include `/ui/config`, `/ui/logo`, `/ui/qr`, or `/s/` — these must remain public.
 
 ### 4. Deploy
 

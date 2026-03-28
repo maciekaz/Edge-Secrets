@@ -1,6 +1,7 @@
 import { Hono, type Context, type MiddlewareHandler } from 'hono'
 import { cors } from 'hono/cors'
 import { getCookie } from 'hono/cookie'
+import qrcode from 'qrcode-generator'
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -82,6 +83,13 @@ interface SecretMetadata {
   attempts: number
 }
 
+interface LinkMetadata {
+  url: string
+  maxClicks: number
+  clicks: number
+  createdAt: number
+}
+
 interface StoreBody {
   id: string
   encryptedData: string
@@ -109,7 +117,7 @@ interface UploadCompleteBody {
 const HTML_SECURITY_HEADERS: Record<string, string> = {
   'Content-Type': 'text/html;charset=UTF-8',
   'Content-Security-Policy':
-    "default-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com https://ins.com.pl; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: https://ins.com.pl; object-src 'none'; frame-ancestors 'none';",
+    "default-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data:; object-src 'none'; frame-ancestors 'none';",
   'X-Frame-Options': 'DENY',
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer',
@@ -138,6 +146,35 @@ function safeCompare(a: string, b: string): boolean {
   let mismatch = 0
   for (let i = 0; i < a.length; i++) mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i)
   return mismatch === 0
+}
+
+function generateShortId(length = 7): string {
+  const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+  const bytes = crypto.getRandomValues(new Uint8Array(length))
+  return Array.from(bytes)
+    .map((b) => chars[b % chars.length])
+    .join('')
+}
+
+function isValidRedirectUrl(raw: string): boolean {
+  let u: URL
+  try { u = new URL(raw) } catch { return false }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return false
+  const h = u.hostname.toLowerCase()
+  // Block localhost, loopback, link-local, and RFC-1918 private ranges
+  if (
+    h === 'localhost' ||
+    /^127\./.test(h) ||
+    /^0\./.test(h) ||
+    /^10\./.test(h) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(h) ||
+    /^192\.168\./.test(h) ||
+    /^169\.254\./.test(h) ||
+    h === '::1' ||
+    /^fc00:/i.test(h) ||
+    /^fd[0-9a-f]{2}:/i.test(h)
+  ) return false
+  return true
 }
 
 const hashPwd = async (p: string | null | undefined, pepper: string): Promise<string | null> => {
@@ -278,6 +315,7 @@ app.use('/gen', requireAccess)
 app.use('/api/store', requireAccess)
 app.use('/api/stats', requireAccess)
 app.use('/api/upload/*', requireAccess)
+app.use('/api/shorten', requireAccess)
 
 app.get('/', (c) => c.redirect('/gen', 302))
 
@@ -294,6 +332,177 @@ app.get('/receive/:id', (c) =>
 )
 
 app.get('/share/:id', (c) => handleFileDownload(c))
+
+// QR code generator — public, server-side SVG rendering
+app.get('/ui/qr', (c) => {
+  const raw = c.req.query('d') ?? ''
+  if (!raw || raw.length > 2000) return c.text('', 400)
+
+  let data: string
+  try { data = decodeURIComponent(raw) } catch { return c.text('', 400) }
+
+  try {
+    const qr = qrcode(0, 'M')
+    qr.addData(data, 'Byte')
+    qr.make()
+    const n = qr.getModuleCount()
+    const pad = 4
+    const cells: string[] = []
+    for (let r = 0; r < n; r++)
+      for (let col = 0; col < n; col++)
+        if (qr.isDark(r, col))
+          cells.push(`<rect x="${col + pad}" y="${r + pad}" width="1" height="1"/>`)
+
+    const size = n + pad * 2
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" shape-rendering="crispEdges"><rect width="${size}" height="${size}" fill="white"/><g fill="black">${cells.join('')}</g></svg>`
+    return new Response(svg, {
+      headers: {
+        'Content-Type': 'image/svg+xml',
+        'Cache-Control': 'public, max-age=3600',
+        'X-Content-Type-Options': 'nosniff',
+      },
+    })
+  } catch {
+    return c.text('QR generation failed — data too long', 400)
+  }
+})
+
+// Global UI config — public read, protected write
+app.get('/ui/config', async (c) => {
+  const [accent, bg, brand, tagline] = await Promise.all([
+    c.env.SECRETS_STORE.get('ui:accent'),
+    c.env.SECRETS_STORE.get('ui:bg'),
+    c.env.SECRETS_STORE.get('ui:brand'),
+    c.env.SECRETS_STORE.get('ui:tagline'),
+  ])
+  return c.json({
+    accent:  accent  ?? '#818cf8',
+    bg:      bg      ?? '#000000',
+    brand:   brand   ?? null,
+    tagline: tagline ?? null,
+  })
+})
+
+app.post('/api/ui/config', requireAccess, async (c) => {
+  const body = await c.req.json<{ accent?: string; bg?: string; brand?: string | null; tagline?: string | null }>()
+  const hexRe = /^#[0-9a-fA-F]{6}$/
+  if ((body.accent && !hexRe.test(body.accent)) || (body.bg && !hexRe.test(body.bg))) {
+    return c.json({ error: 'Invalid color value' }, 400)
+  }
+  if (body.brand !== undefined && body.brand !== null && body.brand.length > 32) {
+    return c.json({ error: 'Brand name max 32 chars' }, 400)
+  }
+  if (body.tagline !== undefined && body.tagline !== null && body.tagline.length > 60) {
+    return c.json({ error: 'Tagline max 60 chars' }, 400)
+  }
+  await Promise.all([
+    body.accent  ? c.env.SECRETS_STORE.put('ui:accent', body.accent)   : Promise.resolve(),
+    body.bg      ? c.env.SECRETS_STORE.put('ui:bg', body.bg)           : Promise.resolve(),
+    body.brand   !== undefined ? (body.brand   ? c.env.SECRETS_STORE.put('ui:brand', body.brand)     : c.env.SECRETS_STORE.delete('ui:brand'))   : Promise.resolve(),
+    body.tagline !== undefined ? (body.tagline ? c.env.SECRETS_STORE.put('ui:tagline', body.tagline) : c.env.SECRETS_STORE.delete('ui:tagline')) : Promise.resolve(),
+  ])
+  return c.json({ ok: true })
+})
+
+// URL shortener — create link (protected), redirect (public)
+app.post('/api/shorten', async (c) => {
+  const body = await c.req.json<{ url?: string; ttl?: number; maxClicks?: number }>()
+
+  if (!body.url || typeof body.url !== 'string') {
+    return c.json({ error: 'URL required' }, 400)
+  }
+  if (!isValidRedirectUrl(body.url)) {
+    return c.json({ error: 'Invalid or unsafe URL — must be http/https and not a private address' }, 400)
+  }
+
+  const ttlSec =
+    body.ttl === -1 ? -1 : Math.min(Math.max(parseInt(String(body.ttl ?? 86400)), 3600), CONFIG.maxTtl)
+  const maxClicks =
+    body.maxClicks === -1 ? -1 : Math.min(Math.max(parseInt(String(body.maxClicks ?? -1)), 1), 10000)
+
+  const id = generateShortId()
+  const meta: LinkMetadata = {
+    url: body.url,
+    maxClicks,
+    clicks: 0,
+    createdAt: Date.now(),
+  }
+
+  await c.env.SECRETS_STORE.put(`link:${id}`, body.url, {
+    ...(ttlSec > 0 ? { expirationTtl: ttlSec } : {}),
+    metadata: meta satisfies LinkMetadata,
+  })
+
+  const origin = new URL(c.req.url).origin
+  return c.json({ id, shortUrl: `${origin}/s/${id}` })
+})
+
+app.get('/s/:id', async (c) => {
+  const id = c.req.param('id')
+  if (!/^[a-zA-Z0-9]{5,12}$/.test(id)) return c.text('Not found', 404)
+
+  const { value: url, metadata } =
+    await c.env.SECRETS_STORE.getWithMetadata<LinkMetadata>(`link:${id}`)
+
+  if (!url || !metadata) return c.text('Link not found or expired', 404)
+
+  // Defense-in-depth: re-validate stored URL before redirecting
+  if (!isValidRedirectUrl(url)) {
+    await c.env.SECRETS_STORE.delete(`link:${id}`)
+    return c.text('Invalid link target', 400)
+  }
+
+  // Click tracking — enforce limit if set
+  if (metadata.maxClicks !== -1) {
+    const newClicks = metadata.clicks + 1
+    if (newClicks >= metadata.maxClicks) {
+      await c.env.SECRETS_STORE.delete(`link:${id}`)
+    } else {
+      await c.env.SECRETS_STORE.put(`link:${id}`, url, {
+        metadata: { ...metadata, clicks: newClicks } satisfies LinkMetadata,
+      })
+    }
+  }
+
+  return new Response(null, {
+    status: 302,
+    headers: {
+      Location: url,
+      'Cache-Control': 'no-store',
+      'Referrer-Policy': 'no-referrer',
+      'X-Robots-Tag': 'noindex, nofollow',
+    },
+  })
+})
+
+// Logo — public read, protected upload/delete (stored in R2)
+app.get('/ui/logo', async (c) => {
+  const obj = await c.env.BUCKET.get('ui-logo')
+  if (!obj) return c.text('', 404)
+  const headers = new Headers()
+  headers.set('Content-Type', obj.httpMetadata?.contentType ?? 'image/png')
+  headers.set('Cache-Control', 'public, max-age=3600')
+  return new Response(obj.body, { headers })
+})
+
+app.post('/api/ui/logo', requireAccess, async (c) => {
+  const ct = c.req.header('Content-Type') ?? 'image/png'
+  const allowed = ['image/png', 'image/svg+xml', 'image/jpeg', 'image/webp']
+  if (!allowed.some((t) => ct.startsWith(t))) {
+    return c.json({ error: 'Invalid image type — use PNG, SVG, JPEG, or WebP' }, 400)
+  }
+  const buf = await c.req.arrayBuffer()
+  if (buf.byteLength > 262144) {
+    return c.json({ error: 'Logo max 256 KB' }, 400)
+  }
+  await c.env.BUCKET.put('ui-logo', buf, { httpMetadata: { contentType: ct } })
+  return c.json({ ok: true })
+})
+
+app.delete('/api/ui/logo', requireAccess, async (c) => {
+  await c.env.BUCKET.delete('ui-logo')
+  return c.json({ ok: true })
+})
 
 // Store encrypted secret in KV
 app.post('/api/store', async (c) => {
@@ -500,80 +709,116 @@ export default {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const CSS = `
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
 :root {
-  /* ── Accent tokens — swap these two to rebrand ── */
-  --accent:       #818cf8;
-  --accent-dim:   rgba(129,140,248,0.09);
-  --accent-2:     #34d399;
-  --accent-2-dim: rgba(52,211,153,0.09);
-  /* ── Surfaces ── */
-  --bg:           #080810;
-  --surface:      #0f0f1c;
-  --surface-2:    #141422;
-  --border:       rgba(255,255,255,0.06);
-  --border-strong:rgba(255,255,255,0.11);
-  /* ── Text ── */
-  --text:         #e2e2f0;
-  --text-muted:   #55556e;
-  --text-dim:     #28283c;
-  /* ── State ── */
-  --success: #34d399;
-  --danger:  #f87171;
+  --accent: #818cf8;
+  --accent-dim: rgba(129,140,248,0.07);
+  --accent-glow: rgba(129,140,248,0.12);
+  --bg: #000; --surface: #060609; --surface-2: #0c0c12; --surface-3: #111118;
+  --border: rgba(255,255,255,0.04); --border-strong: rgba(255,255,255,0.08);
+  --text: #e8e8f2; --text-muted: #4a4a64; --text-dim: #1e1e30;
+  --success: #34d399; --danger: #f87171;
 }
-* { box-sizing: border-box; font-family: 'Inter', sans-serif; }
-body { background: var(--bg); display: flex; flex-direction: column; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 20px; color: var(--text); }
-body::before { content: ''; position: fixed; inset: 0; background-image: linear-gradient(rgba(255,255,255,0.012) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,0.012) 1px,transparent 1px); background-size: 44px 44px; pointer-events: none; z-index: 0; }
-.card { background: var(--surface); width: 100%; max-width: 640px; border: 1px solid var(--border-strong); padding: 40px; position: relative; z-index: 1; animation: slideIn 0.3s cubic-bezier(0.16,1,0.3,1); }
-.card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px; background: linear-gradient(90deg,transparent,var(--accent),transparent); }
-@keyframes slideIn { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
-.brand-header { text-align: center; margin-bottom: 32px; }
-.brand-logo { font-size: 1rem; font-weight: 700; letter-spacing: 0.12em; color: var(--accent); }
-.tabs { display: flex; background: var(--surface-2); border: 1px solid var(--border); margin-bottom: 28px; }
-.tab { flex: 1; text-align: center; padding: 11px; font-weight: 600; font-size: 0.75rem; text-decoration: none; color: var(--text-muted); transition: color 0.15s, background 0.15s; border: none; letter-spacing: 0.08em; text-transform: uppercase; }
-.tab:hover { color: var(--text); background: rgba(255,255,255,0.03); }
-.tab.active { background: var(--accent-dim); color: var(--accent); }
-.label-row { display: flex; justify-content: space-between; align-items: center; font-weight: 600; font-size: 0.68rem; text-transform: uppercase; margin-bottom: 8px; color: var(--text-muted); letter-spacing: 0.1em; }
-.action-link { cursor: pointer; color: var(--accent); font-size: 0.68rem; background: var(--accent-dim); padding: 3px 10px; transition: background 0.15s, color 0.15s; font-weight: 600; letter-spacing: 0.06em; border: 1px solid transparent; }
-.action-link:hover { background: var(--accent); color: var(--bg); }
-textarea, input, select { width: 100%; border: 1px solid var(--border-strong); padding: 13px 15px; font-size: 0.9rem; border-radius: 0; margin-bottom: 20px; outline: none; background: var(--surface-2); color: var(--text); transition: border-color 0.15s; -webkit-appearance: none; appearance: none; }
-textarea:focus, input:focus, select:focus { border-color: var(--accent); background: var(--surface-2); }
-textarea { min-height: 130px; font-family: 'Inter', monospace; resize: vertical; }
-.btn { width: 100%; padding: 15px; background: var(--accent); color: var(--bg); border: none; border-radius: 0; font-weight: 700; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.14em; cursor: pointer; display: flex; justify-content: center; align-items: center; gap: 10px; transition: opacity 0.15s; position: relative; overflow: hidden; }
-.btn > * { pointer-events: none; }
-.btn::after { content: ''; position: absolute; inset: 0; background: rgba(255,255,255,0); transition: background 0.15s; }
-.btn:hover::after { background: rgba(255,255,255,0.08); }
-.btn:active::after { background: rgba(0,0,0,0.1); }
-.btn-del { padding: 5px 12px; font-size: 0.68rem; background: transparent; color: var(--danger); border: 1px solid var(--danger); border-radius: 0; cursor: pointer; font-weight: 600; transition: background 0.15s, color 0.15s; letter-spacing: 0.06em; text-transform: uppercase; }
-.btn-del:hover { background: var(--danger); color: var(--bg); }
-.res-box { border: 1px solid var(--border-strong); padding: 20px; margin-bottom: 4px; background: var(--surface-2); }
-.storage-info { display: flex; justify-content: space-between; font-size: 0.72rem; font-weight: 500; color: var(--text-muted); margin-bottom: 6px; letter-spacing: 0.04em; }
-.timer-wrap { background: var(--surface-2); border: 1px solid var(--border); height: 3px; overflow: hidden; margin-bottom: 24px; }
-.timer-fill { height: 100%; background: var(--accent-2); width: 0%; transition: width 0.8s cubic-bezier(0.4,0,0.2,1); }
-.drop-zone { border: 1px dashed var(--border-strong); padding: 36px 20px; text-align: center; cursor: pointer; background: var(--surface-2); margin-bottom: 20px; transition: border-color 0.15s, background 0.15s; position: relative; }
-.drop-zone > * { pointer-events: none; }
-.drop-zone:hover { border-color: var(--accent); background: var(--accent-dim); }
-.input-group { display: flex; gap: 6px; margin-bottom: 20px; }
-.input-group input { margin-bottom: 0; flex: 1; }
-.btn-copy { background: var(--surface-2); color: var(--text-muted); border: 1px solid var(--border-strong); border-radius: 0; font-weight: 600; padding: 0 18px; cursor: pointer; min-width: 85px; transition: border-color 0.15s, color 0.15s; display: flex; align-items: center; justify-content: center; font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.08em; }
-.btn-copy > * { pointer-events: none; }
-.btn-copy:hover { border-color: var(--accent); color: var(--accent); }
-.overlay { position: fixed; top:0; left:0; width:100%; height:100%; background: rgba(8,8,16,0.88); backdrop-filter: blur(8px); z-index: 100; display: none; justify-content: center; align-items: center; }
-.modal { background: var(--surface); border: 1px solid var(--border-strong); padding: 32px; text-align: center; max-width: 380px; width: 90%; animation: slideIn 0.2s cubic-bezier(0.16,1,0.3,1); position: relative; }
-.modal::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px; background: linear-gradient(90deg,transparent,var(--accent),transparent); }
-.modal h3 { margin-top: 0; color: var(--accent); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.1em; }
-.modal-btn { margin-top: 20px; width: 100%; padding: 12px; background: var(--accent); color: var(--bg); border: none; border-radius: 0; font-weight: 700; cursor: pointer; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.1em; transition: opacity 0.15s; }
-.modal-btn:hover { opacity: 0.85; }
-pre { background: var(--surface-2); color: var(--accent-2); padding: 20px; white-space: pre-wrap; word-break: break-all; font-size: 0.95rem; margin-bottom: 24px; font-family: 'Courier New', monospace; border: 1px solid var(--border-strong); border-left: 2px solid var(--accent-2); }
-.hidden { display: none !important; }
-.spinner { width: 15px; height: 15px; border: 2px solid rgba(8,8,16,0.3); border-top-color: var(--bg); border-radius: 50%; animation: rot 0.65s linear infinite; display: none; }
-@keyframes rot { to { transform: rotate(360deg); } }
-.meta-tag { font-size: 0.62rem; background: var(--surface-2); border: 1px solid var(--border); padding: 2px 7px; color: var(--text-muted); margin-left: 8px; font-weight: 600; letter-spacing: 0.05em; }
-table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 0.82rem; }
-td, th { padding: 11px 8px; border-bottom: 1px solid var(--border); text-align: left; color: var(--text); }
-th { color: var(--text-muted); font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.09em; font-weight: 600; }
-footer { margin-top: 28px; color: var(--text-dim); font-size: 0.72rem; text-align: center; letter-spacing: 0.06em; }
-.timer-text { position: absolute; width: 100%; text-align: center; font-size: 0.75rem; font-weight: 600; color: var(--text-muted); letter-spacing: 0.06em; }
+*{box-sizing:border-box;font-family:'Inter',sans-serif;margin:0}
+body{background:var(--bg);display:flex;flex-direction:column;justify-content:center;align-items:center;min-height:100vh;padding:20px;color:var(--text);position:relative}
+body::before{content:'';position:fixed;top:50%;left:50%;width:min(700px,90vw);height:min(700px,90vh);transform:translate(-50%,-50%);background:radial-gradient(circle,var(--accent-glow) 0%,transparent 65%);pointer-events:none;z-index:0;transition:background 0.4s}
+.card{background:var(--surface);width:100%;max-width:640px;border:1px solid var(--border-strong);padding:40px;position:relative;z-index:1;animation:cardIn 0.45s cubic-bezier(0.16,1,0.3,1);box-shadow:0 0 120px -40px var(--accent-glow)}
+.card::before{content:'';position:absolute;top:0;left:50%;right:50%;height:1px;background:var(--accent);animation:drawLine 0.6s 0.15s cubic-bezier(0.16,1,0.3,1) forwards}
+.card::after{content:'';position:absolute;top:0;left:0;right:0;height:120px;background:linear-gradient(180deg,var(--accent-dim),transparent);pointer-events:none;opacity:0;animation:glowFade 0.8s 0.2s forwards}
+@keyframes cardIn{from{opacity:0;transform:translateY(18px) scale(0.98)}to{opacity:1;transform:translateY(0) scale(1)}}
+@keyframes drawLine{to{left:0;right:0}}
+@keyframes glowFade{to{opacity:1}}
+.brand-header{text-align:center;margin-bottom:30px}
+.brand-logo{font-size:0.82rem;font-weight:800;letter-spacing:0.22em;color:var(--accent);display:inline-block;position:relative}
+.brand-logo::after{content:'';display:block;width:0;height:1px;background:var(--accent);margin:6px auto 0;animation:drawBrand 0.5s 0.4s cubic-bezier(0.16,1,0.3,1) forwards}
+.brand-tagline{font-size:0.58rem;color:var(--text-muted);letter-spacing:0.14em;text-transform:uppercase;margin-top:6px}
+.cfg-input{background:var(--surface-2);border:1px solid var(--border-strong);color:var(--text);padding:5px 8px;font-size:0.7rem;font-family:'Inter',sans-serif;outline:none;transition:border-color 0.2s;width:130px;border-radius:0}
+.cfg-input:focus{border-color:var(--accent)}
+@keyframes drawBrand{to{width:100%}}
+.tabs{display:flex;background:var(--surface-2);border:1px solid var(--border);margin-bottom:26px;position:relative;overflow:hidden}
+.tab{flex:1;text-align:center;padding:11px;font-weight:600;font-size:0.72rem;text-decoration:none;color:var(--text-muted);transition:color 0.2s,background 0.2s;border:none;letter-spacing:0.1em;text-transform:uppercase;position:relative;z-index:1}
+.tab:hover{color:var(--text);background:rgba(255,255,255,0.02)}
+.tab.active{color:var(--accent);background:var(--accent-dim)}
+.tab.active::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;background:var(--accent)}
+.label-row{display:flex;justify-content:space-between;align-items:center;font-weight:600;font-size:0.65rem;text-transform:uppercase;margin-bottom:8px;color:var(--text-muted);letter-spacing:0.12em}
+.action-link{cursor:pointer;color:var(--accent);font-size:0.65rem;background:var(--accent-dim);padding:3px 10px;transition:all 0.2s;font-weight:600;letter-spacing:0.06em;border:1px solid transparent}
+.action-link:hover{background:var(--accent);color:var(--bg)}
+textarea,input,select{width:100%;border:1px solid var(--border-strong);padding:13px 15px;font-size:0.88rem;border-radius:0;margin-bottom:18px;outline:none;background:var(--surface-2);color:var(--text);transition:border-color 0.2s,box-shadow 0.2s;-webkit-appearance:none;appearance:none}
+textarea:focus,input:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent-dim)}
+textarea{min-height:120px;font-family:'Inter',monospace;resize:vertical}
+.btn{width:100%;padding:15px;background:var(--accent);color:var(--bg);border:none;border-radius:0;font-weight:700;font-size:0.75rem;text-transform:uppercase;letter-spacing:0.16em;cursor:pointer;display:flex;justify-content:center;align-items:center;gap:10px;position:relative;overflow:hidden;transition:box-shadow 0.2s}
+.btn>*{pointer-events:none}
+.btn::after{content:'';position:absolute;top:0;left:0;bottom:0;width:0;background:rgba(255,255,255,0.08);transition:width 0.3s cubic-bezier(0.16,1,0.3,1)}
+.btn:hover::after{width:100%}
+.btn:hover{box-shadow:0 0 30px -8px var(--accent-glow)}
+.btn:active::after{background:rgba(0,0,0,0.12);width:100%}
+.btn-del{padding:5px 12px;font-size:0.65rem;background:transparent;color:var(--danger);border:1px solid rgba(248,113,113,0.3);border-radius:0;cursor:pointer;font-weight:600;transition:all 0.2s;letter-spacing:0.06em;text-transform:uppercase}
+.btn-del:hover{background:var(--danger);color:var(--bg);border-color:var(--danger)}
+.res-box{border:1px solid var(--border-strong);padding:20px;background:var(--surface-2)}
+.storage-info{display:flex;justify-content:space-between;font-size:0.7rem;font-weight:500;color:var(--text-muted);margin-bottom:6px;letter-spacing:0.04em}
+.timer-wrap{background:var(--surface-2);border:1px solid var(--border);height:3px;overflow:hidden;margin-bottom:22px}
+.timer-fill{height:100%;background:var(--accent);width:0%;transition:width 0.8s cubic-bezier(0.4,0,0.2,1)}
+.drop-zone{border:1px dashed var(--border-strong);padding:36px 20px;text-align:center;cursor:pointer;background:var(--surface-2);margin-bottom:18px;transition:all 0.2s;position:relative}
+.drop-zone>*{pointer-events:none}
+.drop-zone:hover{border-color:var(--accent);background:var(--accent-dim);box-shadow:0 0 40px -12px var(--accent-glow)}
+.input-group{display:flex;gap:6px;margin-bottom:18px}
+.input-group input{margin-bottom:0;flex:1}
+.btn-copy{background:var(--surface-2);color:var(--text-muted);border:1px solid var(--border-strong);border-radius:0;font-weight:600;padding:0 16px;cursor:pointer;min-width:80px;transition:all 0.2s;display:flex;align-items:center;justify-content:center;font-size:0.65rem;text-transform:uppercase;letter-spacing:0.08em}
+.btn-copy>*{pointer-events:none}
+.btn-copy:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-dim)}
+.btn-qr{background:var(--surface-2);color:var(--text-muted);border:1px solid var(--border-strong);border-radius:0;font-weight:700;padding:0 11px;cursor:pointer;flex-shrink:0;transition:all 0.2s;display:flex;align-items:center;justify-content:center;font-size:0.62rem;letter-spacing:0.04em}
+.btn-qr:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-dim)}
+.qr-modal-img{width:200px;height:200px;display:block;margin:0 auto 14px;background:#fff;padding:8px;image-rendering:pixelated}
+.overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.9);backdrop-filter:blur(12px);z-index:100;display:none;justify-content:center;align-items:center}
+.modal{background:var(--surface);border:1px solid var(--border-strong);padding:32px;text-align:center;max-width:360px;width:90%;animation:cardIn 0.25s cubic-bezier(0.16,1,0.3,1);position:relative;box-shadow:0 0 80px -20px var(--accent-glow)}
+.modal::before{content:'';position:absolute;top:0;left:50%;right:50%;height:1px;background:var(--accent);animation:drawLine 0.4s 0.1s cubic-bezier(0.16,1,0.3,1) forwards}
+.modal h3{margin-top:0;color:var(--accent);font-size:0.8rem;text-transform:uppercase;letter-spacing:0.12em}
+.modal p{color:var(--text-muted);font-size:0.85rem}
+.modal-btn{margin-top:20px;width:100%;padding:12px;background:var(--accent);color:var(--bg);border:none;border-radius:0;font-weight:700;cursor:pointer;text-transform:uppercase;font-size:0.72rem;letter-spacing:0.12em;transition:opacity 0.15s}
+.modal-btn:hover{opacity:0.85}
+pre{background:var(--surface-2);color:var(--accent);padding:20px;white-space:pre-wrap;word-break:break-all;font-size:0.92rem;margin-bottom:22px;font-family:'Courier New',monospace;border:1px solid var(--border-strong);border-left:2px solid var(--accent)}
+.hidden{display:none!important}
+.spinner{width:14px;height:14px;border:2px solid rgba(0,0,0,0.2);border-top-color:var(--bg);border-radius:50%;animation:rot 0.6s linear infinite;display:none}
+@keyframes rot{to{transform:rotate(360deg)}}
+.meta-tag{font-size:0.6rem;background:var(--surface-2);border:1px solid var(--border);padding:2px 7px;color:var(--text-muted);margin-left:8px;font-weight:600;letter-spacing:0.05em}
+table{width:100%;border-collapse:collapse;margin-top:12px;font-size:0.8rem}
+td,th{padding:10px 8px;border-bottom:1px solid var(--border);text-align:left;color:var(--text)}
+th{color:var(--text-muted);font-size:0.62rem;text-transform:uppercase;letter-spacing:0.09em;font-weight:600}
+footer{margin-top:28px;color:var(--text-dim);font-size:0.7rem;text-align:center;letter-spacing:0.06em}
+.timer-text{position:absolute;width:100%;text-align:center;font-size:0.72rem;font-weight:600;color:var(--text-muted);letter-spacing:0.06em}
+.cfg-toggle{position:fixed;top:18px;right:18px;z-index:10;width:32px;height:32px;display:flex;align-items:center;justify-content:center;color:var(--text-muted);cursor:pointer;transition:color 0.2s,transform 0.3s;border:1px solid var(--border);background:var(--surface)}
+.cfg-toggle:hover{color:var(--accent);transform:rotate(45deg);border-color:var(--accent)}
+.cfg-toggle svg{width:15px;height:15px}
+.cfg-panel{position:fixed;top:56px;right:18px;z-index:10;background:var(--surface);border:1px solid var(--border-strong);padding:16px 20px;animation:cardIn 0.2s cubic-bezier(0.16,1,0.3,1);min-width:200px}
+.cfg-panel::before{content:'';position:absolute;top:0;left:50%;right:50%;height:1px;background:var(--accent);animation:drawLine 0.3s cubic-bezier(0.16,1,0.3,1) forwards}
+.cfg-row{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.cfg-label{font-size:0.62rem;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--text-muted)}
+.cfg-color{-webkit-appearance:none;appearance:none;width:28px;height:28px;border:1px solid var(--border-strong);padding:0;cursor:pointer;background:none;transition:border-color 0.2s}
+.cfg-color::-webkit-color-swatch-wrapper{padding:0}
+.cfg-color::-webkit-color-swatch{border:none}
+.cfg-color::-moz-color-swatch{border:none}
+.cfg-color:hover{border-color:var(--accent)}
+.cfg-swatch{width:6px;height:6px;background:var(--accent);transition:background 0.2s}
+.cfg-divider{height:1px;background:var(--border);margin:12px 0}
+.cfg-presets{display:flex;gap:7px;flex-wrap:wrap;margin-top:2px}
+.cfg-preset,.cfg-preset-bg{width:20px;height:20px;border:1px solid transparent;cursor:pointer;transition:transform 0.15s,border-color 0.15s;flex-shrink:0}
+.cfg-preset:hover,.cfg-preset-bg:hover{transform:scale(1.25);border-color:rgba(255,255,255,0.3)}
+.cfg-preset.active,.cfg-preset-bg.active{border-color:#fff}
+.cfg-section{margin-bottom:10px}
+.cfg-section-label{font-size:0.58rem;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;color:var(--text-muted);margin-bottom:8px}
+.cfg-picker-row{display:flex;align-items:center;gap:8px;margin-top:8px}
+.cfg-save{width:100%;padding:9px;background:var(--accent);color:var(--bg);border:none;font-weight:700;font-size:0.65rem;text-transform:uppercase;letter-spacing:0.14em;cursor:pointer;transition:opacity 0.2s,box-shadow 0.2s;margin-top:2px}
+.cfg-save:hover:not(:disabled){opacity:0.85;box-shadow:0 0 20px -6px var(--accent-glow)}
+.cfg-save:disabled{opacity:0.5;cursor:default}
+.cfg-save.saved{background:var(--success)!important;color:#000}
+.brand-logo-img{max-height:40px;max-width:200px;object-fit:contain;display:block;margin:0 auto 12px}
+.cfg-upload{display:inline-flex;align-items:center;justify-content:center;padding:6px 14px;background:var(--surface-2);color:var(--text-muted);border:1px solid var(--border-strong);font-weight:600;font-size:0.6rem;text-transform:uppercase;letter-spacing:0.08em;cursor:pointer;transition:all 0.2s;flex:1;text-align:center}
+.cfg-upload:hover{border-color:var(--accent);color:var(--accent)}
+.cfg-upload-del:hover{border-color:var(--danger)!important;color:var(--danger)!important}
+.cfg-logo-preview{max-height:32px;max-width:120px;object-fit:contain}
+[data-theme="light"]{--bg:#eeeef5;--surface:#f8f8fc;--surface-2:#e4e4ee;--surface-3:#d8d8e8;--text:#14141e;--text-muted:rgba(20,20,30,0.45);--text-dim:rgba(20,20,30,0.22);--border:rgba(0,0,0,0.08);--border-strong:rgba(0,0,0,0.14)}
+.theme-toggle{position:fixed;top:18px;left:18px;z-index:10;width:32px;height:32px;display:flex;align-items:center;justify-content:center;cursor:pointer;border:1px solid var(--border);background:var(--surface);color:var(--text-muted);font-size:14px;transition:color 0.2s,border-color 0.2s}
+.theme-toggle:hover{color:var(--accent);border-color:var(--accent)}
 `
 
 const CLIENT_JS = `
@@ -582,6 +827,120 @@ const get = (id) => document.getElementById(id);
 const modal = (t, m) => { get('mT').innerText = t; get('mMsg').innerText = m; get('ov').style.display = 'flex'; };
 const setL = (btn, s) => { if (btn) { btn.disabled = s; const sp = btn.querySelector('.spinner'); if (sp) sp.style.display = s ? 'block' : 'none'; } };
 
+var _customBg = '#000000';
+function _applyBgVars(hex) {
+    var r=parseInt(hex.slice(1,3),16),g=parseInt(hex.slice(3,5),16),b=parseInt(hex.slice(5,7),16);
+    var mix=function(rt){return 'rgb('+Math.round(r+(255-r)*rt)+','+Math.round(g+(255-g)*rt)+','+Math.round(b+(255-b)*rt)+')';};
+    var s=document.documentElement.style;
+    s.setProperty('--bg',hex);s.setProperty('--surface',mix(0.024));s.setProperty('--surface-2',mix(0.047));s.setProperty('--surface-3',mix(0.069));
+}
+function setAccent(hex) {
+    var r=parseInt(hex.slice(1,3),16),g=parseInt(hex.slice(3,5),16),b=parseInt(hex.slice(5,7),16);
+    var s=document.documentElement.style;
+    s.setProperty('--accent',hex);s.setProperty('--accent-dim','rgba('+r+','+g+','+b+',0.07)');s.setProperty('--accent-glow','rgba('+r+','+g+','+b+',0.12)');
+    var sw=get('cfgSwatch');if(sw)sw.style.background=hex;
+    var lbl=get('cfgAccentHex');if(lbl)lbl.textContent=hex;
+    document.querySelectorAll('.cfg-preset').forEach(function(el){el.classList.toggle('active',el.getAttribute('onclick')==="pickPreset('"+hex+"')");});
+}
+function pickPreset(hex){setAccent(hex);var p=get('accentPicker');if(p)p.value=hex;}
+function setBg(hex) {
+    _customBg=hex;
+    if(document.documentElement.getAttribute('data-theme')!=='light')_applyBgVars(hex);
+    var sw=get('cfgBgSwatch');if(sw)sw.style.background=hex;
+    var lbl=get('cfgBgHex');if(lbl)lbl.textContent=hex;
+    document.querySelectorAll('.cfg-preset-bg').forEach(function(el){el.classList.toggle('active',el.getAttribute('onclick')==="pickBgPreset('"+hex+"')");});
+}
+function pickBgPreset(hex){setBg(hex);var p=get('bgPicker');if(p)p.value=hex;}
+function applyTheme(t) {
+    document.documentElement.setAttribute('data-theme',t);
+    var btn=get('themeToggle');if(btn)btn.textContent=t==='dark'?'☀':'🌙';
+    localStorage.setItem('es-theme',t);
+    if(t==='light'){var s=document.documentElement.style;s.removeProperty('--bg');s.removeProperty('--surface');s.removeProperty('--surface-2');s.removeProperty('--surface-3');}
+    else{_applyBgVars(_customBg);}
+}
+function toggleTheme(){var cur=document.documentElement.getAttribute('data-theme')||'dark';applyTheme(cur==='dark'?'light':'dark');}
+function _applyBranding(brand,tagline){
+    var bn=get('brandName');if(bn&&brand)bn.textContent=brand;
+    var bt=get('brandTagline');if(bt){bt.textContent=tagline||'';bt.style.display=tagline?'block':'none';}
+}
+function previewBrand(){
+    var n=get('cfgBrandName'),t=get('cfgTagline');
+    _applyBranding(n?n.value:'',t?t.value:'');
+}
+function saveConfig(){
+    var accent=document.documentElement.style.getPropertyValue('--accent').trim()||'#818cf8';
+    var bg=_customBg;
+    var brand=(get('cfgBrandName')||{value:''}).value.trim();
+    var tagline=(get('cfgTagline')||{value:''}).value.trim();
+    var btn=get('cfgSave');if(btn){btn.disabled=true;btn.textContent='...';}
+    fetch('/api/ui/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({accent:accent,bg:bg,brand:brand||null,tagline:tagline||null})})
+        .then(function(r){return r.json();})
+        .then(function(){if(btn){btn.textContent='ZAPISANO ✓';btn.classList.add('saved');setTimeout(function(){btn.textContent='ZAPISZ';btn.classList.remove('saved');btn.disabled=false;},2000);}})
+        .catch(function(){if(btn){btn.textContent='BŁĄD';btn.disabled=false;setTimeout(function(){btn.textContent='ZAPISZ';},2000);}});
+}
+function uploadLogo(){
+    var input=get('logoInput');if(!input||!input.files.length)return;var file=input.files[0];
+    if(file.size>262144){modal('Błąd','Logo max 256 KB');return;}
+    fetch('/api/ui/logo',{method:'POST',headers:{'Content-Type':file.type},body:file})
+        .then(function(r){if(!r.ok)throw r;return r.json();})
+        .then(function(){
+            var ts='?'+Date.now();
+            var m=get('brandLogoImg');if(m){m.src='/ui/logo'+ts;m.style.display='block';}
+            var pv=get('logoPreview');if(pv){pv.src='/ui/logo'+ts;pv.style.display='block';}
+            var st=get('logoStatus');if(st)st.textContent='Logo aktywne';
+        })
+        .catch(function(){modal('Błąd','Nie udało się wgrać logo');});
+}
+function removeLogo(){
+    fetch('/api/ui/logo',{method:'DELETE'})
+        .then(function(r){if(!r.ok)throw r;return r.json();})
+        .then(function(){
+            var m=get('brandLogoImg');if(m)m.style.display='none';
+            var pv=get('logoPreview');if(pv)pv.style.display='none';
+            var st=get('logoStatus');if(st)st.textContent='Brak logo';
+        })
+        .catch(function(){});
+}
+async function shorten(){
+    var urlEl=get('lurl');if(!urlEl)return;
+    var url=urlEl.value.trim();
+    if(!url){modal('Błąd','Wprowadź URL');return;}
+    var btn=get('btnLink');setL(btn,true);
+    try{
+        var r=await fetch('/api/shorten',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:url,ttl:parseInt(get('lttl').value),maxClicks:parseInt(get('lclicks').value)})});
+        var d=await r.json();
+        if(!r.ok||d.error){modal('Błąd',d.error||'Wystąpił błąd');return;}
+        get('shortLink').value=d.shortUrl;
+        get('link-res').classList.remove('hidden');
+    }catch(e){modal('Błąd','Nie udało się skrócić linku');}
+    finally{setL(btn,false);}
+}
+(function(){
+    var savedTheme=localStorage.getItem('es-theme');
+    var sysTheme=window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';
+    applyTheme(savedTheme||sysTheme);
+    fetch('/ui/config').then(function(r){return r.json();}).then(function(cfg){
+        if(cfg.accent){setAccent(cfg.accent);var p=get('accentPicker');if(p)p.value=cfg.accent;}
+        if(cfg.bg){_customBg=cfg.bg;var p2=get('bgPicker');if(p2)p2.value=cfg.bg;var sw=get('cfgBgSwatch');if(sw)sw.style.background=cfg.bg;var lbl=get('cfgBgHex');if(lbl)lbl.textContent=cfg.bg;if(document.documentElement.getAttribute('data-theme')!=='light')_applyBgVars(cfg.bg);}
+        _applyBranding(cfg.brand||'',cfg.tagline||'');
+        var ni=get('cfgBrandName');if(ni&&cfg.brand)ni.value=cfg.brand;
+        var ti=get('cfgTagline');if(ti&&cfg.tagline)ti.value=cfg.tagline;
+    }).catch(function(){});
+    var bh=document.querySelector('.brand-header');
+    if(bh){
+        var li=document.createElement('img');li.id='brandLogoImg';li.className='brand-logo-img';
+        li.src='/ui/logo';li.style.display='none';
+        li.onload=function(){this.style.display='block';var st=get('logoStatus');if(st)st.textContent='Logo aktywne';};
+        li.onerror=function(){this.style.display='none';};
+        bh.insertBefore(li,bh.firstChild);
+    }
+})();
+
+function showQR(url){
+    get('qrImg').src='/ui/qr?d='+encodeURIComponent(url);
+    get('qrTxt').textContent=url;
+    get('qrOv').style.display='flex';
+}
 function escapeHtml(u) { return u.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;"); }
 
 async function copyBtn(btn, text) {
@@ -600,8 +959,8 @@ function showFile() {
     if (f) {
         const d = get('dtxt');
         d.innerHTML = '<span style="font-size:2.5rem">\u{1F4C4}</span><br><strong style="font-size:1.1rem; color:var(--text)">' + escapeHtml(f.name) + '</strong><br><span style="color:var(--text-muted); font-size:0.9rem; font-weight:500">' + (f.size / 1048576).toFixed(2) + ' MB</span>';
-        d.parentNode.style.borderColor = 'var(--primary)';
-        d.parentNode.style.backgroundColor = '#eff6ff';
+        d.parentNode.style.borderColor = 'var(--accent)';
+        d.parentNode.style.backgroundColor = 'var(--accent-dim)';
     }
 }
 
@@ -679,8 +1038,8 @@ async function upl() {
         }
         get('f').value = '';
         get('dtxt').innerHTML = 'KLIKNIJ ABY WYBRAĆ PLIK';
-        get('dtxt').parentNode.style.backgroundColor = '#f8fafc';
-        get('dtxt').parentNode.style.borderColor = 'var(--border)';
+        get('dtxt').parentNode.style.backgroundColor = 'var(--surface-2)';
+        get('dtxt').parentNode.style.borderColor = 'var(--border-strong)';
         loadS();
     } catch (e) { m.innerText = 'Błąd: ' + e.message; } finally { setL(get('btnF'), 0); }
 }
@@ -734,7 +1093,7 @@ async function start(p, bid) {
             const p = (tl / 300 * 100);
             const fill = get('tFill');
             fill.style.width = p + '%';
-            if (tl < 60) fill.style.background = 'var(--danger)'; else if (tl < 150) fill.style.background = '#f59e0b'; else fill.style.background = 'var(--primary)';
+            if (tl < 60) fill.style.background = 'var(--danger)'; else if (tl < 150) fill.style.background = '#f59e0b'; else fill.style.background = 'var(--accent)';
             if (tl <= 0) location.reload();
         };
         setInterval(tick, 1000);
@@ -754,17 +1113,20 @@ if (location.hash.length > 1 && get('m-auto')) {
 `
 
 const BASE_HTML = (body: string): string =>
-  `<!DOCTYPE html><html lang="pl"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Edge Secrets</title><style>${CSS}</style></head><body>${body}${CLIENT_JS}</body></html>`
+  `<!DOCTYPE html><html lang="pl"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Edge Secrets</title><style>${CSS}</style></head><body><button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" title="Toggle theme">☀</button>${body}<div class="overlay" id="qrOv" onclick="if(event.target===this)this.style.display='none'" style="display:none"><div class="modal" style="max-width:280px;padding:28px"><h3 style="margin-bottom:18px">KOD QR</h3><img id="qrImg" class="qr-modal-img" alt="QR Code" src=""><p id="qrTxt" style="font-size:0.6rem;word-break:break-all;color:var(--text-muted);margin-bottom:18px;text-align:center;line-height:1.5"></p><button class="modal-btn" onclick="get('qrOv').style.display='none'">ZAMKNIJ</button></div></div>${CLIENT_JS}</body></html>`
 
 function renderGen(type: string): string {
-  const isCred = type === 'cred'
+  const isLink = type === 'link'
+  const isFile = type === 'file'
+  const isCred = !isLink && !isFile
   const body = `
   <script>window.L = ${JSON.stringify(I18N.pl)};</script>
   <div class="card">
-      <div class="brand-header"><span class="brand-logo">EDGE SECRETS</span></div>
+      <div class="brand-header"><span class="brand-logo" id="brandName">EDGE SECRETS</span><p class="brand-tagline" id="brandTagline" style="display:none"></p></div>
       <div class="tabs">
           <a href="?t=cred" class="tab ${isCred ? 'active' : ''}">POŚWIADCZENIA</a>
-          <a href="?t=file" class="tab ${!isCred ? 'active' : ''}">PLIKI (5GB)</a>
+          <a href="?t=file" class="tab ${isFile ? 'active' : ''}">PLIKI (5GB)</a>
+          <a href="?t=link" class="tab ${isLink ? 'active' : ''}">LINKI</a>
       </div>
       ${
         isCred
@@ -781,13 +1143,13 @@ function renderGen(type: string): string {
       <div id="v-result" class="hidden">
           <div class="res-box">
               <div class="label-row">OPCJA 1: MANUAL (BEZ HASŁA)</div>
-              <div class="input-group"><input type="text" id="linkS" readonly onclick="this.select()"><button class="btn-copy" onclick="copyBtn(this, get('linkS').value)">KOPIUJ</button></div>
+              <div class="input-group"><input type="text" id="linkS" readonly onclick="this.select()"><button class="btn-copy" onclick="copyBtn(this, get('linkS').value)">KOPIUJ</button><button class="btn-qr" onclick="showQR(get('linkS').value)" title="Kod QR">QR</button></div>
               <div class="label-row">OPCJA 2: FAST (LINK Z HASŁEM)</div>
-              <div class="input-group"><input type="text" id="linkE" readonly onclick="this.select()"><button class="btn-copy" onclick="copyBtn(this, get('linkE').value)">KOPIUJ</button></div>
+              <div class="input-group"><input type="text" id="linkE" readonly onclick="this.select()"><button class="btn-copy" onclick="copyBtn(this, get('linkE').value)">KOPIUJ</button><button class="btn-qr" onclick="showQR(get('linkE').value)" title="Kod QR">QR</button></div>
           </div>
           <button class="btn" style="background:transparent; color:var(--text); border:1px solid var(--border-strong); margin-top:20px;" onclick="location.reload()">NOWA OPERACJA</button>
       </div>`
-          : `
+          : isFile ? `
       <div id="v-file-upload">
           <div class="drop-zone" onclick="get('f').click()">
               <div style="font-size:30px; margin-bottom:10px;">
@@ -805,8 +1167,8 @@ function renderGen(type: string): string {
           <div id="fmsg" style="margin-top:15px; font-weight:600; text-align:center; color:var(--accent); font-size:0.85rem; letter-spacing:0.04em;"></div>
           <div class="res-box hidden" id="f-res">
              <div class="label-row">OPCJA 1: MANUAL (BEZ HASŁA)</div>
-             <div class="input-group"><input type="text" id="flinkS" readonly onclick="this.select()"><button class="btn-copy" onclick="copyBtn(this, get('flinkS').value)">KOPIUJ</button></div>
-             <div id="f-auto-row" class="hidden"><div class="label-row">OPCJA 2: FAST (LINK Z HASŁEM)</div><div class="input-group"><input type="text" id="flinkE" readonly onclick="this.select()"><button class="btn-copy" onclick="copyBtn(this, get('flinkE').value)">KOPIUJ</button></div></div>
+             <div class="input-group"><input type="text" id="flinkS" readonly onclick="this.select()"><button class="btn-copy" onclick="copyBtn(this, get('flinkS').value)">KOPIUJ</button><button class="btn-qr" onclick="showQR(get('flinkS').value)" title="Kod QR">QR</button></div>
+             <div id="f-auto-row" class="hidden"><div class="label-row">OPCJA 2: FAST (LINK Z HASŁEM)</div><div class="input-group"><input type="text" id="flinkE" readonly onclick="this.select()"><button class="btn-copy" onclick="copyBtn(this, get('flinkE').value)">KOPIUJ</button><button class="btn-qr" onclick="showQR(get('flinkE').value)" title="Kod QR">QR</button></div></div>
           </div>
       </div>
       <div style="margin-top:36px; padding-top:20px; border-top:1px solid var(--border);">
@@ -814,9 +1176,91 @@ function renderGen(type: string): string {
           <div class="storage-info"><span id="st_txt">Ładowanie...</span></div>
           <div class="timer-wrap"><div id="bar" class="timer-fill"></div></div>
           <table id="tbl"><tbody></tbody></table>
+      </div>` : `
+      <div id="v-link">
+          <div class="label-row"><span>DOCELOWY URL</span></div>
+          <input type="url" id="lurl" placeholder="https://..." autocomplete="off">
+          <div style="display:flex;gap:15px">
+              <div style="flex:1"><div class="label-row">WYGAŚNIĘCIE</div><select id="lttl"><option value="3600">1 Godzina</option><option value="86400" selected>24 Godziny</option><option value="604800">7 Dni</option><option value="-1">Nigdy</option></select></div>
+              <div style="flex:1"><div class="label-row">LIMIT KLIKNIĘĆ</div><select id="lclicks"><option value="1">1 Raz</option><option value="10">10 Razy</option><option value="100">100 Razy</option><option value="-1" selected>Bez limitu</option></select></div>
+          </div>
+          <button class="btn" onclick="shorten()" id="btnLink"><span>SKRÓĆ LINK</span><div class="spinner"></div></button>
+          <div class="res-box hidden" id="link-res">
+              <div class="label-row">SKRÓCONY LINK</div>
+              <div class="input-group"><input type="text" id="shortLink" readonly onclick="this.select()"><button class="btn-copy" onclick="copyBtn(this,get('shortLink').value)">KOPIUJ</button><button class="btn-qr" onclick="showQR(get('shortLink').value)" title="Kod QR">QR</button></div>
+              <button class="btn" style="background:transparent;color:var(--text);border:1px solid var(--border-strong);margin-top:16px" onclick="get('link-res').classList.add('hidden');get('lurl').value='';get('lurl').focus()">NOWY LINK</button>
+          </div>
       </div>`
       }
-  </div><div id="ov" class="overlay"><div class="modal"><h3 id="mT"></h3><p id="mMsg"></p><button class="modal-btn" onclick="get('ov').style.display='none'">OK</button></div></div>`
+  </div><div id="ov" class="overlay"><div class="modal"><h3 id="mT"></h3><p id="mMsg"></p><button class="modal-btn" onclick="get('ov').style.display='none'">OK</button></div></div>
+  <div class="cfg-toggle" id="cfgToggle" onclick="document.getElementById('cfgPanel').classList.toggle('hidden');this.classList.toggle('open')">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+  </div>
+  <div class="cfg-panel hidden" id="cfgPanel">
+    <div class="cfg-section">
+      <div class="cfg-section-label">Akcent</div>
+      <div class="cfg-presets">
+        <div class="cfg-preset" style="background:#818cf8" onclick="pickPreset('#818cf8')" title="Indigo"></div>
+        <div class="cfg-preset" style="background:#a78bfa" onclick="pickPreset('#a78bfa')" title="Violet"></div>
+        <div class="cfg-preset" style="background:#60a5fa" onclick="pickPreset('#60a5fa')" title="Blue"></div>
+        <div class="cfg-preset" style="background:#22d3ee" onclick="pickPreset('#22d3ee')" title="Cyan"></div>
+        <div class="cfg-preset" style="background:#34d399" onclick="pickPreset('#34d399')" title="Emerald"></div>
+        <div class="cfg-preset" style="background:#fb7185" onclick="pickPreset('#fb7185')" title="Rose"></div>
+        <div class="cfg-preset" style="background:#fbbf24" onclick="pickPreset('#fbbf24')" title="Amber"></div>
+        <div class="cfg-preset" style="background:#f8fafc" onclick="pickPreset('#f8fafc')" title="White"></div>
+      </div>
+      <div class="cfg-picker-row">
+        <div class="cfg-swatch" id="cfgSwatch"></div>
+        <input type="color" class="cfg-color" id="accentPicker" value="#818cf8" oninput="setAccent(this.value)">
+        <span class="cfg-label" id="cfgAccentHex" style="flex:1;text-align:right">#818cf8</span>
+      </div>
+    </div>
+    <div class="cfg-divider"></div>
+    <div class="cfg-section">
+      <div class="cfg-section-label">Tło</div>
+      <div class="cfg-presets">
+        <div class="cfg-preset-bg" style="background:#000000;border:1px solid rgba(255,255,255,0.15)" onclick="pickBgPreset('#000000')" title="Pure Black"></div>
+        <div class="cfg-preset-bg" style="background:#080810" onclick="pickBgPreset('#080810')" title="Indigo Black"></div>
+        <div class="cfg-preset-bg" style="background:#05080f" onclick="pickBgPreset('#05080f')" title="Navy Black"></div>
+        <div class="cfg-preset-bg" style="background:#0d0610" onclick="pickBgPreset('#0d0610')" title="Violet Black"></div>
+        <div class="cfg-preset-bg" style="background:#060f08" onclick="pickBgPreset('#060f08')" title="Forest Black"></div>
+        <div class="cfg-preset-bg" style="background:#100608" onclick="pickBgPreset('#100608')" title="Crimson Black"></div>
+        <div class="cfg-preset-bg" style="background:#0f0c05" onclick="pickBgPreset('#0f0c05')" title="Amber Black"></div>
+      </div>
+      <div class="cfg-picker-row">
+        <div class="cfg-swatch" id="cfgBgSwatch" style="background:#000"></div>
+        <input type="color" class="cfg-color" id="bgPicker" value="#000000" oninput="setBg(this.value)">
+        <span class="cfg-label" id="cfgBgHex" style="flex:1;text-align:right">#000000</span>
+      </div>
+    </div>
+    <div class="cfg-divider"></div>
+    <div class="cfg-section">
+      <div class="cfg-section-label">Branding</div>
+      <div class="cfg-row" style="margin-bottom:8px">
+        <span class="cfg-label">Nazwa</span>
+        <input type="text" class="cfg-input" id="cfgBrandName" placeholder="EDGE SECRETS" maxlength="32" oninput="previewBrand()">
+      </div>
+      <div class="cfg-row">
+        <span class="cfg-label">Tagline</span>
+        <input type="text" class="cfg-input" id="cfgTagline" placeholder="Opcjonalny podpis..." maxlength="60" oninput="previewBrand()">
+      </div>
+    </div>
+    <div class="cfg-divider"></div>
+    <div class="cfg-section">
+      <div class="cfg-section-label">Logo <span style="font-weight:400;opacity:0.6">PNG / SVG / WebP, max 256 KB</span></div>
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+        <img id="logoPreview" class="cfg-logo-preview" src="/ui/logo" onload="this.style.display='inline-block'" onerror="this.style.display='none'" style="display:none">
+        <span class="cfg-label" id="logoStatus">Brak logo</span>
+      </div>
+      <div style="display:flex;gap:6px">
+        <span class="cfg-upload" onclick="get('logoInput').click()">WGRAJ</span>
+        <span class="cfg-upload cfg-upload-del" onclick="removeLogo()">USUŃ</span>
+      </div>
+      <input type="file" id="logoInput" accept="image/png,image/svg+xml,image/jpeg,image/webp" style="display:none" onchange="uploadLogo()">
+    </div>
+    <div class="cfg-divider"></div>
+    <button class="cfg-save" id="cfgSave" onclick="saveConfig()">ZAPISZ</button>
+  </div>`
   return BASE_HTML(body)
 }
 
@@ -853,7 +1297,7 @@ function renderReceiveFile(filename: string, lang: Lang): string {
   const body = `
   <script>window.L = ${JSON.stringify(lang)};</script>
   <div class="card">
-      <div class="brand-header"><span class="brand-logo">EDGE SECRETS</span></div>
+      <div class="brand-header"><span class="brand-logo" id="brandName">EDGE SECRETS</span><p class="brand-tagline" id="brandTagline" style="display:none"></p></div>
       <h2 style="text-align:center; font-size:1.1rem; margin-bottom:24px; color:var(--text); font-weight:600; letter-spacing:0.04em;">${lang.title_file}</h2>
       <div style="text-align:center; padding: 20px 0;">
           <div style="font-size:3rem; margin-bottom:15px; text-shadow: 0 4px 6px rgba(0,0,0,0.1)">\u{1F4E6}</div>
