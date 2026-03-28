@@ -149,36 +149,63 @@ flowchart TD
 
 ## Deploy
 
+### 1. Clone and install
+
 ```bash
+git clone https://github.com/maciekaz/edge-secrets
+cd edge-secrets
 npm install
-npx wrangler deploy
 ```
 
-### Required `wrangler.toml` Bindings
+### 2. Configure `wrangler.toml`
 
-```toml
-[[kv_namespaces]]
-binding = "SECRETS_STORE"
-id = "<KV_NAMESPACE_ID>"
+Copy the example config and fill in your values:
 
-[[d1_databases]]
-binding = "DB"
-database_name = "<D1_DATABASE_NAME>"
-database_id = "<D1_DATABASE_ID>"
-
-[[r2_buckets]]
-binding = "BUCKET"
-bucket_name = "<R2_BUCKET_NAME>"
+```bash
+cp wrangler.example.toml wrangler.toml
 ```
 
-### Required Cloudflare Secrets
+`wrangler.toml` is git-ignored — your account ID and resource IDs stay local.
+
+#### Create Cloudflare resources
+
+```bash
+# KV namespace
+npx wrangler kv namespace create SECRETS_STORE
+# → copy the returned id into wrangler.toml
+
+# D1 database
+npx wrangler d1 create secret-db
+# → copy the returned database_id into wrangler.toml
+
+# R2 bucket is auto-provisioned on first deploy
+```
+
+#### Initialize D1 schema
+
+```bash
+npx wrangler d1 execute secret-db --remote --command \
+  "CREATE TABLE IF NOT EXISTS files (
+    id TEXT PRIMARY KEY,
+    filename TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    password_hash TEXT,
+    max_downloads INTEGER NOT NULL DEFAULT 1,
+    download_count INTEGER NOT NULL DEFAULT 0,
+    failed_attempts INTEGER NOT NULL DEFAULT 0
+  );"
+```
+
+### 3. Set Cloudflare Secrets
 
 None of these go into the repo or `wrangler.toml`. The Worker won't start without all three.
 
 ```bash
-# 1. Global pepper for file password hashes
-openssl rand -base64 32
-npx wrangler secret put PEPPER
+# 1. Global pepper for file password hashes (generate a random one)
+echo "$(openssl rand -base64 32)" | npx wrangler secret put PEPPER
 
 # 2. Cloudflare Access team domain
 npx wrangler secret put CF_TEAM_DOMAIN
@@ -189,7 +216,15 @@ npx wrangler secret put CF_TEAM_DOMAIN
 npx wrangler secret put CF_AUD
 ```
 
-> **Note:** `CF_AUD` is unique per CF Access application. Without it, JWT verification always returns 401. Make sure you also have an **Access Policy** configured in CF Zero Trust for the protected paths (`/gen`, `/api/store`, `/api/stats`, `/api/upload`).
+> Make sure you have a CF Zero Trust **Access Policy** configured for the protected paths: `/gen`, `/api/store`, `/api/stats`, `/api/upload`.
+
+### 4. Deploy
+
+```bash
+npx wrangler deploy
+```
+
+---
 
 ### Local Development
 
