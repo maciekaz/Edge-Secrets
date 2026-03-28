@@ -500,60 +500,80 @@ export default {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const CSS = `
-@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 :root {
-    --primary: #0d6efd; --primary-dark: #0043a8; --primary-grad: linear-gradient(135deg, #0d6efd 0%, #0043a8 100%);
-    --bg-grad: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
-    --card-bg: #ffffff; --text: #1e293b; --text-muted: #64748b; --border: #e2e8f0; --success: #10b981; --danger: #ef4444;
+  /* ── Accent tokens — swap these two to rebrand ── */
+  --accent:       #818cf8;
+  --accent-dim:   rgba(129,140,248,0.09);
+  --accent-2:     #34d399;
+  --accent-2-dim: rgba(52,211,153,0.09);
+  /* ── Surfaces ── */
+  --bg:           #080810;
+  --surface:      #0f0f1c;
+  --surface-2:    #141422;
+  --border:       rgba(255,255,255,0.06);
+  --border-strong:rgba(255,255,255,0.11);
+  /* ── Text ── */
+  --text:         #e2e2f0;
+  --text-muted:   #55556e;
+  --text-dim:     #28283c;
+  /* ── State ── */
+  --success: #34d399;
+  --danger:  #f87171;
 }
-* { box-sizing: border-box; font-family: 'Poppins', sans-serif; }
-body { background: var(--bg-grad); display: flex; flex-direction: column; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 20px; color: var(--text); }
-.card { background: var(--card-bg); width: 100%; max-width: 650px; border-radius: 24px; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.35); padding: 45px; position: relative; z-index: 1; animation: fadeUp 0.6s cubic-bezier(0.16, 1, 0.3, 1); }
-@keyframes fadeUp { from { opacity: 0; transform: translateY(30px); } to { opacity: 1; transform: translateY(0); } }
-.brand-header { text-align: center; margin-bottom: 35px; }
-.brand-logo { height: 75px; width: auto; transition: transform 0.3s ease; }
-.brand-logo:hover { transform: scale(1.05); }
-.tabs { display: flex; background: #f1f5f9; padding: 6px; border-radius: 14px; margin-bottom: 30px; }
-.tab { flex: 1; text-align: center; padding: 12px; border-radius: 10px; font-weight: 600; font-size: 0.95rem; text-decoration: none; color: var(--text-muted); transition: all 0.2s; border: none; }
-.tab:hover { color: var(--primary); background: rgba(255,255,255,0.6); }
-.tab.active { background: #fff; color: var(--primary-dark); box-shadow: 0 4px 10px -2px rgba(0,0,0,0.1); }
-.label-row { display: flex; justify-content: space-between; align-items: center; font-weight: 700; font-size: 0.75rem; text-transform: uppercase; margin-bottom: 10px; color: var(--text-muted); letter-spacing: 0.8px; }
-.action-link { cursor: pointer; color: var(--primary); font-size: 0.75rem; background: #eff6ff; padding: 3px 10px; border-radius: 6px; transition: 0.2s; font-weight: 600; }
-.action-link:hover { background: var(--primary); color: #fff; }
-textarea, input, select { width: 100%; border: 2px solid var(--border); padding: 16px; font-size: 1rem; border-radius: 12px; margin-bottom: 24px; outline: none; background: #f8fafc; color: var(--text); transition: all 0.2s; }
-textarea:focus, input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px rgba(13, 110, 253, 0.15); background: #fff; }
-textarea { min-height: 140px; font-family: 'Poppins', monospace; resize: vertical; }
-.btn { width: 100%; padding: 18px; background: var(--primary-grad); color: #fff; border: none; border-radius: 14px; font-weight: 600; font-size: 1.05rem; text-transform: uppercase; letter-spacing: 1px; cursor: pointer; display: flex; justify-content: center; align-items: center; gap: 12px; transition: all 0.2s; box-shadow: 0 8px 20px -4px rgba(13, 110, 253, 0.4); position: relative; overflow: hidden; }
+* { box-sizing: border-box; font-family: 'Inter', sans-serif; }
+body { background: var(--bg); display: flex; flex-direction: column; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 20px; color: var(--text); }
+body::before { content: ''; position: fixed; inset: 0; background-image: linear-gradient(rgba(255,255,255,0.012) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,0.012) 1px,transparent 1px); background-size: 44px 44px; pointer-events: none; z-index: 0; }
+.card { background: var(--surface); width: 100%; max-width: 640px; border: 1px solid var(--border-strong); padding: 40px; position: relative; z-index: 1; animation: slideIn 0.3s cubic-bezier(0.16,1,0.3,1); }
+.card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px; background: linear-gradient(90deg,transparent,var(--accent),transparent); }
+@keyframes slideIn { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
+.brand-header { text-align: center; margin-bottom: 32px; }
+.brand-logo { font-size: 1rem; font-weight: 700; letter-spacing: 0.12em; color: var(--accent); }
+.tabs { display: flex; background: var(--surface-2); border: 1px solid var(--border); margin-bottom: 28px; }
+.tab { flex: 1; text-align: center; padding: 11px; font-weight: 600; font-size: 0.75rem; text-decoration: none; color: var(--text-muted); transition: color 0.15s, background 0.15s; border: none; letter-spacing: 0.08em; text-transform: uppercase; }
+.tab:hover { color: var(--text); background: rgba(255,255,255,0.03); }
+.tab.active { background: var(--accent-dim); color: var(--accent); }
+.label-row { display: flex; justify-content: space-between; align-items: center; font-weight: 600; font-size: 0.68rem; text-transform: uppercase; margin-bottom: 8px; color: var(--text-muted); letter-spacing: 0.1em; }
+.action-link { cursor: pointer; color: var(--accent); font-size: 0.68rem; background: var(--accent-dim); padding: 3px 10px; transition: background 0.15s, color 0.15s; font-weight: 600; letter-spacing: 0.06em; border: 1px solid transparent; }
+.action-link:hover { background: var(--accent); color: var(--bg); }
+textarea, input, select { width: 100%; border: 1px solid var(--border-strong); padding: 13px 15px; font-size: 0.9rem; border-radius: 0; margin-bottom: 20px; outline: none; background: var(--surface-2); color: var(--text); transition: border-color 0.15s; -webkit-appearance: none; appearance: none; }
+textarea:focus, input:focus, select:focus { border-color: var(--accent); background: var(--surface-2); }
+textarea { min-height: 130px; font-family: 'Inter', monospace; resize: vertical; }
+.btn { width: 100%; padding: 15px; background: var(--accent); color: var(--bg); border: none; border-radius: 0; font-weight: 700; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.14em; cursor: pointer; display: flex; justify-content: center; align-items: center; gap: 10px; transition: opacity 0.15s; position: relative; overflow: hidden; }
 .btn > * { pointer-events: none; }
-.btn:hover { transform: translateY(-2px); box-shadow: 0 12px 25px -5px rgba(13, 110, 253, 0.5); filter: brightness(1.1); }
-.btn:active { transform: translateY(0); }
-.btn-del { padding: 6px 14px; font-size: 0.75rem; background: #fee2e2; color: var(--danger); border: none; border-radius: 8px; cursor: pointer; font-weight: 700; transition: 0.2s; }
-.btn-del:hover { background: var(--danger); color: #fff; }
-.storage-info { display: flex; justify-content: space-between; font-size: 0.8rem; font-weight: 600; color: var(--text-muted); margin-bottom: 5px; }
-.timer-wrap { background: #e2e8f0; height: 12px; border-radius: 6px; overflow: hidden; margin-bottom: 25px; }
-.timer-fill { height: 100%; background: var(--success); width: 0%; transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1); border-radius: 6px; }
-.drop-zone { border: 3px dashed #cbd5e1; padding: 40px 20px; text-align: center; cursor: pointer; background: #f8fafc; border-radius: 16px; margin-bottom: 24px; transition: 0.2s; position: relative; }
+.btn::after { content: ''; position: absolute; inset: 0; background: rgba(255,255,255,0); transition: background 0.15s; }
+.btn:hover::after { background: rgba(255,255,255,0.08); }
+.btn:active::after { background: rgba(0,0,0,0.1); }
+.btn-del { padding: 5px 12px; font-size: 0.68rem; background: transparent; color: var(--danger); border: 1px solid var(--danger); border-radius: 0; cursor: pointer; font-weight: 600; transition: background 0.15s, color 0.15s; letter-spacing: 0.06em; text-transform: uppercase; }
+.btn-del:hover { background: var(--danger); color: var(--bg); }
+.res-box { border: 1px solid var(--border-strong); padding: 20px; margin-bottom: 4px; background: var(--surface-2); }
+.storage-info { display: flex; justify-content: space-between; font-size: 0.72rem; font-weight: 500; color: var(--text-muted); margin-bottom: 6px; letter-spacing: 0.04em; }
+.timer-wrap { background: var(--surface-2); border: 1px solid var(--border); height: 3px; overflow: hidden; margin-bottom: 24px; }
+.timer-fill { height: 100%; background: var(--accent-2); width: 0%; transition: width 0.8s cubic-bezier(0.4,0,0.2,1); }
+.drop-zone { border: 1px dashed var(--border-strong); padding: 36px 20px; text-align: center; cursor: pointer; background: var(--surface-2); margin-bottom: 20px; transition: border-color 0.15s, background 0.15s; position: relative; }
 .drop-zone > * { pointer-events: none; }
-.drop-zone:hover { border-color: var(--primary); background: #eff6ff; transform: scale(1.01); }
-.input-group { display: flex; gap: 10px; margin-bottom: 20px; }
-.input-group input { margin-bottom: 0; border-radius: 10px; flex: 1; }
-.btn-copy { background: #e2e8f0; color: var(--text-muted); border: none; border-radius: 10px; font-weight: 700; padding: 0 24px; cursor: pointer; min-width: 100px; transition: 0.2s; display: flex; align-items: center; justify-content: center; }
+.drop-zone:hover { border-color: var(--accent); background: var(--accent-dim); }
+.input-group { display: flex; gap: 6px; margin-bottom: 20px; }
+.input-group input { margin-bottom: 0; flex: 1; }
+.btn-copy { background: var(--surface-2); color: var(--text-muted); border: 1px solid var(--border-strong); border-radius: 0; font-weight: 600; padding: 0 18px; cursor: pointer; min-width: 85px; transition: border-color 0.15s, color 0.15s; display: flex; align-items: center; justify-content: center; font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.08em; }
 .btn-copy > * { pointer-events: none; }
-.btn-copy:hover { background: #cbd5e1; color: var(--text); }
-.overlay { position: fixed; top:0; left:0; width:100%; height:100%; background: rgba(15, 23, 42, 0.7); backdrop-filter: blur(5px); z-index: 100; display: none; justify-content: center; align-items: center; }
-.modal { background: #fff; padding: 30px; border-radius: 20px; text-align: center; max-width: 400px; width: 90%; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5); animation: fadeUp 0.3s; }
-.modal h3 { margin-top: 0; color: var(--primary-dark); }
-.modal-btn { margin-top: 20px; width: 100%; padding: 12px; background: var(--primary-grad); color: white; border: none; border-radius: 10px; font-weight: 600; cursor: pointer; text-transform: uppercase; }
-.modal-btn:hover { filter: brightness(1.1); }
-pre { background: #0f172a; color: #4ade80; padding: 25px; border-radius: 12px; white-space: pre-wrap; word-break: break-all; font-size: 1.1rem; margin-bottom: 25px; font-family: 'Courier New', monospace; border: 1px solid #334155; box-shadow: inset 0 2px 4px 0 rgba(0, 0, 0, 0.3); }
+.btn-copy:hover { border-color: var(--accent); color: var(--accent); }
+.overlay { position: fixed; top:0; left:0; width:100%; height:100%; background: rgba(8,8,16,0.88); backdrop-filter: blur(8px); z-index: 100; display: none; justify-content: center; align-items: center; }
+.modal { background: var(--surface); border: 1px solid var(--border-strong); padding: 32px; text-align: center; max-width: 380px; width: 90%; animation: slideIn 0.2s cubic-bezier(0.16,1,0.3,1); position: relative; }
+.modal::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px; background: linear-gradient(90deg,transparent,var(--accent),transparent); }
+.modal h3 { margin-top: 0; color: var(--accent); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.1em; }
+.modal-btn { margin-top: 20px; width: 100%; padding: 12px; background: var(--accent); color: var(--bg); border: none; border-radius: 0; font-weight: 700; cursor: pointer; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.1em; transition: opacity 0.15s; }
+.modal-btn:hover { opacity: 0.85; }
+pre { background: var(--surface-2); color: var(--accent-2); padding: 20px; white-space: pre-wrap; word-break: break-all; font-size: 0.95rem; margin-bottom: 24px; font-family: 'Courier New', monospace; border: 1px solid var(--border-strong); border-left: 2px solid var(--accent-2); }
 .hidden { display: none !important; }
-.spinner { width: 24px; height: 24px; border: 3px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; animation: rot 0.8s linear infinite; display: none; }
+.spinner { width: 15px; height: 15px; border: 2px solid rgba(8,8,16,0.3); border-top-color: var(--bg); border-radius: 50%; animation: rot 0.65s linear infinite; display: none; }
 @keyframes rot { to { transform: rotate(360deg); } }
-.meta-tag { font-size: 0.7rem; background: #e2e8f0; padding: 3px 8px; border-radius: 6px; color: var(--text-muted); margin-left: 10px; font-weight: 600; }
-table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 0.9rem; }
-td, th { padding: 14px 10px; border-bottom: 1px solid var(--border); text-align: left; color: var(--text); }
-td:first-child { font-weight: 600; color: var(--primary-dark); }
-footer { margin-top: 30px; color: rgba(255,255,255,0.5); font-size: 0.8rem; text-align: center; }
+.meta-tag { font-size: 0.62rem; background: var(--surface-2); border: 1px solid var(--border); padding: 2px 7px; color: var(--text-muted); margin-left: 8px; font-weight: 600; letter-spacing: 0.05em; }
+table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 0.82rem; }
+td, th { padding: 11px 8px; border-bottom: 1px solid var(--border); text-align: left; color: var(--text); }
+th { color: var(--text-muted); font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.09em; font-weight: 600; }
+footer { margin-top: 28px; color: var(--text-dim); font-size: 0.72rem; text-align: center; letter-spacing: 0.06em; }
+.timer-text { position: absolute; width: 100%; text-align: center; font-size: 0.75rem; font-weight: 600; color: var(--text-muted); letter-spacing: 0.06em; }
 `
 
 const CLIENT_JS = `
@@ -734,18 +754,14 @@ if (location.hash.length > 1 && get('m-auto')) {
 `
 
 const BASE_HTML = (body: string): string =>
-  `<!DOCTYPE html><html lang="pl"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>INS Secrets </title><link rel="icon" href="https://ins.com.pl/assets/favicon.png"><style>${CSS}</style></head><body>${body}<footer>Powered by <strong>INS SOLUTIONS</strong></footer>${CLIENT_JS}</body></html>`
+  `<!DOCTYPE html><html lang="pl"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Edge Secrets</title><style>${CSS}</style></head><body>${body}${CLIENT_JS}</body></html>`
 
 function renderGen(type: string): string {
   const isCred = type === 'cred'
   const body = `
   <script>window.L = ${JSON.stringify(I18N.pl)};</script>
   <div class="card">
-      <div class="brand-header">
-          <a href="https://ins.com.pl">
-              <img src="https://ins.com.pl/assets/ins_white_onlylogo.png" alt="INS Logo" class="brand-logo" style="filter: brightness(0) saturate(100%) invert(32%) sepia(99%) saturate(1352%) hue-rotate(211deg) brightness(96%) contrast(105%);">
-          </a>
-      </div>
+      <div class="brand-header"><span class="brand-logo">EDGE SECRETS</span></div>
       <div class="tabs">
           <a href="?t=cred" class="tab ${isCred ? 'active' : ''}">POŚWIADCZENIA</a>
           <a href="?t=file" class="tab ${!isCred ? 'active' : ''}">PLIKI (5GB)</a>
@@ -769,13 +785,13 @@ function renderGen(type: string): string {
               <div class="label-row">OPCJA 2: FAST (LINK Z HASŁEM)</div>
               <div class="input-group"><input type="text" id="linkE" readonly onclick="this.select()"><button class="btn-copy" onclick="copyBtn(this, get('linkE').value)">KOPIUJ</button></div>
           </div>
-          <button class="btn" style="background:#fff; color:var(--text); border:2px solid var(--border); margin-top:20px;" onclick="location.reload()">NOWA OPERACJA</button>
+          <button class="btn" style="background:transparent; color:var(--text); border:1px solid var(--border-strong); margin-top:20px;" onclick="location.reload()">NOWA OPERACJA</button>
       </div>`
           : `
       <div id="v-file-upload">
           <div class="drop-zone" onclick="get('f').click()">
               <div style="font-size:30px; margin-bottom:10px;">
-                  <span id="dtxt" style="font-weight:600; font-size:0.9rem; color:var(--primary);">KLIKNIJ ABY WYBRAĆ PLIK</span>
+                  <span id="dtxt" style="font-weight:600; font-size:0.85rem; color:var(--accent); letter-spacing:0.06em;">KLIKNIJ ABY WYBRAĆ PLIK</span>
               </div>
           </div>
           <input type="file" id="f" style="display:none" onchange="showFile()">
@@ -786,14 +802,14 @@ function renderGen(type: string): string {
               <div style="flex:1"><div class="label-row">LIMIT POBRAŃ</div><select id="flimit"><option value="1" selected>1 Raz</option><option value="5">5 Razy</option><option value="-1">Bez limitu</option></select></div>
           </div>
           <button class="btn" onclick="upl()" id="btnF"><span>WYŚLIJ PLIK</span><div class="spinner"></div></button>
-          <div id="fmsg" style="margin-top:15px; font-weight:600; text-align:center; color:var(--primary)"></div>
+          <div id="fmsg" style="margin-top:15px; font-weight:600; text-align:center; color:var(--accent); font-size:0.85rem; letter-spacing:0.04em;"></div>
           <div class="res-box hidden" id="f-res">
              <div class="label-row">OPCJA 1: MANUAL (BEZ HASŁA)</div>
              <div class="input-group"><input type="text" id="flinkS" readonly onclick="this.select()"><button class="btn-copy" onclick="copyBtn(this, get('flinkS').value)">KOPIUJ</button></div>
              <div id="f-auto-row" class="hidden"><div class="label-row">OPCJA 2: FAST (LINK Z HASŁEM)</div><div class="input-group"><input type="text" id="flinkE" readonly onclick="this.select()"><button class="btn-copy" onclick="copyBtn(this, get('flinkE').value)">KOPIUJ</button></div></div>
           </div>
       </div>
-      <div style="margin-top:40px; padding-top:20px; border-top:1px solid var(--border);">
+      <div style="margin-top:36px; padding-top:20px; border-top:1px solid var(--border);">
           <div class="label-row">STORAGE</div>
           <div class="storage-info"><span id="st_txt">Ładowanie...</span></div>
           <div class="timer-wrap"><div id="bar" class="timer-fill"></div></div>
@@ -808,23 +824,23 @@ function renderReceiveCred(_id: string, lang: Lang): string {
   const body = `
   <script>window.L = ${JSON.stringify(lang)};</script>
   <div class="card">
-    <div class="brand-header"><a href="https://ins.com.pl"><img src="https://ins.com.pl/assets/ins_white_onlylogo.png" style="filter: brightness(0) saturate(100%) invert(32%) sepia(99%) saturate(1352%) hue-rotate(211deg) brightness(96%) contrast(105%);" class="brand-logo"></a></div>
-    <h2 style="text-align:center; font-size:1.4rem; margin-bottom:20px; color:var(--text); font-weight:600">${lang.title_cred}</h2>
+    <div class="brand-header"><span class="brand-logo">EDGE SECRETS</span></div>
+    <h2 style="text-align:center; font-size:1.1rem; margin-bottom:24px; color:var(--text); font-weight:600; letter-spacing:0.04em;">${lang.title_cred}</h2>
     <div id="m-manual">
       <div class="label-row">${lang.label_key}</div>
       <input type="password" id="recvP" placeholder="${lang.placeholder_key}">
       <button class="btn" onclick="unlockM()" id="btnM"><span>${lang.btn_decrypt}</span><div class="spinner"></div></button>
     </div>
     <div id="m-auto" class="hidden" style="text-align:center">
-      <div style="background:#eff6ff; padding:20px; border-radius:12px; font-weight:600; margin-bottom:20px; color:var(--primary); border:2px solid #dbeafe">${lang.ready_msg}</div>
+      <div style="background:var(--accent-dim); padding:18px; font-weight:600; margin-bottom:20px; color:var(--accent); border:1px solid var(--border-strong); font-size:0.82rem; letter-spacing:0.08em; text-align:center;">${lang.ready_msg}</div>
       <button class="btn" onclick="unlockA()" id="btnA"><span>${lang.btn_open}</span><div class="spinner"></div></button>
     </div>
     <div id="v-decrypted" class="hidden">
       <div class="label-row">${lang.label_decrypted}</div>
       <pre id="content"></pre>
       <div style="position:relative; margin-top:20px;">
-          <div class="timer-wrap" style="height:36px; border-radius:18px; margin-bottom:0;"><div id="tFill" class="timer-fill" style="border-radius:18px;"></div></div>
-          <div id="tText" class="timer-text" style="top:0; line-height:36px; text-shadow:0 1px 2px rgba(0,0,0,0.3);"></div>
+          <div class="timer-wrap" style="height:28px; margin-bottom:0;"><div id="tFill" class="timer-fill"></div></div>
+          <div id="tText" class="timer-text" style="top:0; line-height:28px;"></div>
       </div>
       <button class="btn" style="margin-top:20px;" onclick="copyBtn(this, get('content').innerText)"><span>${lang.btn_copy}</span></button>
     </div>
@@ -837,8 +853,8 @@ function renderReceiveFile(filename: string, lang: Lang): string {
   const body = `
   <script>window.L = ${JSON.stringify(lang)};</script>
   <div class="card">
-      <div class="brand-header"><a href="https://ins.com.pl"><img src="https://ins.com.pl/assets/ins_white_onlylogo.png" style="filter: brightness(0) saturate(100%) invert(32%) sepia(99%) saturate(1352%) hue-rotate(211deg) brightness(96%) contrast(105%);" class="brand-logo"></a></div>
-      <h2 style="text-align:center; font-size:1.4rem; margin-bottom:20px; color:var(--text); font-weight:600">${lang.title_file}</h2>
+      <div class="brand-header"><span class="brand-logo">EDGE SECRETS</span></div>
+      <h2 style="text-align:center; font-size:1.1rem; margin-bottom:24px; color:var(--text); font-weight:600; letter-spacing:0.04em;">${lang.title_file}</h2>
       <div style="text-align:center; padding: 20px 0;">
           <div style="font-size:3rem; margin-bottom:15px; text-shadow: 0 4px 6px rgba(0,0,0,0.1)">\u{1F4E6}</div>
           <h2 style="border:none; margin:0; font-size:1.3rem; word-break: break-all; font-weight:600; color:var(--text)">${safeName}</h2>
