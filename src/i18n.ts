@@ -1,8 +1,8 @@
 // ── i18n Module ── Edge Secrets ─────────────────────────────────────────────
 
-export type LangCode = 'en' | 'pl' | 'de' | 'fr' | 'es' | 'uk' | 'pt' | 'zh'
+export type LangCode = 'en' | 'pl' | 'de' | 'fr' | 'es' | 'uk' | 'pt' | 'zh' | 'cs'
 
-export const SUPPORTED_LANGS: readonly LangCode[] = ['en', 'pl', 'de', 'fr', 'es', 'uk', 'pt', 'zh'] as const
+export const SUPPORTED_LANGS: readonly LangCode[] = ['en', 'pl', 'de', 'fr', 'es', 'uk', 'pt', 'zh', 'cs'] as const
 
 export interface Translations {
   // ── Public pages (receive / share) ──
@@ -997,6 +997,115 @@ export const I18N: Record<LangCode, Translations> = {
     cfg_turnstile_files: '\u4FDD\u62A4\u6587\u4EF6\u4E0B\u8F7D',
     ts_verify: '\u5B89\u5168\u9A8C\u8BC1',
   },
+
+  // ────────────────────────── Čeština ──────────────────────────
+  cs: {
+    title_cred: 'Bezpečné načtení dat',
+    title_file: 'Bezpečné stažení souboru',
+    label_key: 'ZADEJTE DEŠIFROVACÍ KLÍČ',
+    placeholder_key: 'Přístupový klíč...',
+    btn_decrypt: 'DEŠIFROVAT',
+    ready_msg: 'DATA PŘIPRAVENA K PŘEČTENÍ',
+    btn_open: 'OTEVŘÍT ZPRÁVU',
+    label_decrypted: 'DEŠIFROVANÁ DATA:',
+    btn_copy: 'KOPÍROVAT OBSAH',
+    file_protected: 'SOUBOR CHRÁNĚNÝ HESLEM',
+    btn_unlock: 'ODEMKNOUT A STÁHNOUT',
+
+    tab_creds: 'PŘIHLAŠOVACÍ ÚDAJE',
+    tab_files: 'SOUBORY (5GB)',
+    tab_links: 'ODKAZY',
+
+    label_secret: 'TAJNÝ OBSAH',
+    action_gen_password: 'GENEROVAT HESLO',
+    placeholder_secret: 'Vložte důvěrná data zde...',
+    label_encrypt_key: 'ŠIFROVACÍ KLÍČ',
+    action_gen_key: 'GENEROVAT KLÍČ',
+    placeholder_encrypt: 'Heslo pro odemčení...',
+    label_ttl: 'DOBA PLATNOSTI',
+    ttl_1h: '1 Hodina',
+    ttl_24h: '24 Hodin',
+    ttl_72h: '72 Hodin',
+    btn_generate_links: 'GENEROVAT ODKAZY',
+    option1_manual: 'MOŽNOST 1: MANUÁLNÍ (BEZ HESLA)',
+    option2_fast: 'MOŽNOST 2: RYCHLÉ (ODKAZ S HESLEM)',
+    copy: 'KOPÍROVAT',
+    btn_new_operation: 'NOVÁ OPERACE',
+
+    label_pwd_optional: 'HESLO (VOLITELNÉ)',
+    placeholder_leave_empty: 'Nechte prázdné pro veřejný odkaz',
+    label_retention: 'RETENCE',
+    label_download_limit: 'LIMIT STAŽENÍ',
+    ttl_12h: '12 Hodin',
+    ttl_2d: '2 Dny',
+    ttl_7d: '7 Dní',
+    limit_1: '1 Krát',
+    limit_5: '5 Krát',
+    limit_unlimited: 'Bez limitu',
+    btn_send_file: 'NAHRÁT SOUBOR',
+    label_storage: 'ÚLOŽIŠTĚ',
+    loading: 'Načítání...',
+
+    label_target_url: 'CÍLOVÁ URL',
+    label_expiry: 'VYPRŠENÍ',
+    label_click_limit: 'LIMIT KLIKNUTÍ',
+    ttl_never: 'Nikdy',
+    limit_10: '10 Krát',
+    limit_100: '100 Krát',
+    btn_shorten: 'ZKRÁTIT ODKAZ',
+    label_short_link: 'ZKRÁCENÝ ODKAZ',
+    btn_new_link: 'NOVÝ ODKAZ',
+
+    cfg_accent: 'Akcent',
+    cfg_bg: 'Pozadí',
+    cfg_branding: 'Branding',
+    cfg_name: 'Název',
+    cfg_tagline_label: 'Tagline',
+    cfg_tagline_placeholder: 'Volitelný podtitulek...',
+    cfg_logo_label: 'Logo',
+    cfg_logo_specs: 'PNG / SVG / WebP, max 256 KB',
+    cfg_upload: 'NAHRÁT',
+    cfg_delete: 'SMAZAT',
+
+    qr_title: 'QR KÓD',
+    qr_close: 'ZAVŘÍT',
+
+    js_copied: 'Zkopírováno!',
+    js_manual: 'Zkopírujte ručně: ',
+    js_nopass: 'Vyžadováno heslo',
+    js_timer: 'AUTOMATICKÉ SMAZÁNÍ ZA: ',
+    js_error: 'CHYBA',
+    js_info: 'INFO',
+    js_enter_data: 'Zadejte data.',
+    js_server_error: 'Chyba serveru',
+    js_select_file: 'Vyberte soubor',
+    js_initializing: 'Inicializace...',
+    js_uploading: 'Nahrávání: ',
+    js_done: 'Hotovo!',
+    js_click_select: 'KLIKNĚTE PRO VÝBĚR SOUBORU',
+    js_error_prefix: 'Chyba: ',
+    js_used: 'Použito: ',
+    js_downloads: 'Stažení: ',
+    js_confirm_delete: 'Trvale smazat soubor?',
+    js_enter_url: 'Zadejte URL',
+    js_error_occurred: 'Došlo k chybě',
+    js_shorten_fail: 'Nepodařilo se zkrátit odkaz',
+    js_logo_max: 'Logo max 256 KB',
+    js_logo_active: 'Logo aktivní',
+    js_no_logo: 'Žádné logo',
+    js_logo_fail: 'Nepodařilo se nahrát logo',
+    js_saved: 'ULOŽENO \u2713',
+    js_save: 'ULOŽIT',
+    js_btn_delete: 'SMAZAT',
+
+    lang_picker_title: 'Jazyk',
+
+    cfg_turnstile: 'TURNSTILE',
+    cfg_turnstile_site_key: 'Site Key',
+    cfg_turnstile_creds: 'Chránit načítání tajemství',
+    cfg_turnstile_files: 'Chránit stahování souborů',
+    ts_verify: 'BEZPEČNOSTNÍ KONTROLA',
+  },
 }
 
 // ── Language detection ──────────────────────────────────────────────────────
@@ -1034,6 +1143,7 @@ const LANG_OPTIONS: ReadonlyArray<{ code: LangCode; flag: string; name: string }
   { code: 'uk', flag: '\uD83C\uDDFA\uD83C\uDDE6', name: '\u0423\u043A\u0440\u0430\u0457\u043D\u0441\u044C\u043A\u0430' },
   { code: 'pt', flag: '\uD83C\uDDF5\uD83C\uDDF9', name: 'Portugu\u00EAs' },
   { code: 'zh', flag: '\uD83C\uDDE8\uD83C\uDDF3', name: '\u4E2D\u6587' },
+  { code: 'cs', flag: '\uD83C\uDDE8\uD83C\uDDFF', name: '\u010Ce\u0161tina' },
 ]
 
 export function renderLangPicker(currentLang: LangCode): string {
