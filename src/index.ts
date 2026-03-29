@@ -1432,7 +1432,7 @@ function renderReceiveCred(_id: string, lang: Lang, langCode: LangCode, turnstil
     ? `<div class="ts-verify-wrap"><span class="ts-verify-label">${lang.ts_verify}</span><div class="cf-turnstile" data-sitekey="${escapeHtml(turnstileSiteKey)}" data-callback="onTurnstileSuccess" data-theme="auto"></div></div>`
     : ''
   const tsScript = turnstileSiteKey
-    ? `<script src="https://challenges.cloudflare.com/turnstile/v1/api.js" async defer></script>`
+    ? `<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>`
     : ''
   const body = `
   <script>window.L = ${JSON.stringify(lang)};</script>
@@ -1499,7 +1499,7 @@ function renderFileTurnstileGate(
     ? `<input type="password" name="pwd" id="p" placeholder="${lang.placeholder_key}" style="margin-top:14px">`
     : ''
   const tailScript = `
-  <script src="https://challenges.cloudflare.com/turnstile/v1/api.js" defer></script>`
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" defer></script>`
   const body = `
   <script>window.L = ${JSON.stringify(lang)};</script>
   <div class="card">
