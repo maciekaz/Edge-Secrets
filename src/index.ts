@@ -145,7 +145,7 @@ const hashPwd = async (p: string | null | undefined, pepper: string): Promise<st
 
 async function verifyTurnstile(token: string, secret: string): Promise<boolean> {
   try {
-    const res = await fetch('https://challenges.cloudflare.com/turnstile/v1/siteverify', {
+    const res = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ secret, response: token }),
@@ -1227,11 +1227,12 @@ var _tsToken = null;
 var _autoMode = false;
 function onTurnstileSuccess(token) {
   _tsToken = token;
+  var w = get('tsWidget'); if (w) w.style.display = 'none';
   if (_autoMode) {
+    var btnA = get('btnA'); if (btnA) btnA.classList.remove('hidden');
     unlockA();
   } else {
-    var btnM = get('btnM');
-    if (btnM) btnM.disabled = false;
+    var btnM = get('btnM'); if (btnM) btnM.classList.remove('hidden');
   }
 }
 function onTsFile(token) {
@@ -1251,7 +1252,7 @@ if (location.hash.length > 1 && get('btnA')) {
     get('m-manual').classList.add('hidden');
     get('m-auto').classList.remove('hidden');
     get('btnM').classList.add('hidden');
-    get('btnA').classList.remove('hidden');
+    if (!get('tsWidget')) get('btnA').classList.remove('hidden');
 }
 ${LANG_PICKER_JS}
 </script>
@@ -1429,7 +1430,7 @@ function renderGen(type: string, t: Translations, langCode: LangCode): string {
 function renderReceiveCred(_id: string, lang: Lang, langCode: LangCode, turnstileSiteKey: string | null): string {
   const lp = renderLangPicker(langCode)
   const tsWidget = turnstileSiteKey
-    ? `<div class="ts-verify-wrap"><span class="ts-verify-label">${lang.ts_verify}</span><div class="cf-turnstile" data-sitekey="${escapeHtml(turnstileSiteKey)}" data-callback="onTurnstileSuccess" data-theme="auto"></div></div>`
+    ? `<div id="tsWidget" class="ts-verify-wrap"><span class="ts-verify-label">${lang.ts_verify}</span><div class="cf-turnstile" data-sitekey="${escapeHtml(turnstileSiteKey)}" data-callback="onTurnstileSuccess" data-theme="auto"></div></div>`
     : ''
   const tsScript = turnstileSiteKey
     ? `<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>`
@@ -1447,8 +1448,8 @@ function renderReceiveCred(_id: string, lang: Lang, langCode: LangCode, turnstil
       <div style="background:var(--accent-dim); padding:18px; font-weight:600; margin-bottom:20px; color:var(--accent); border:1px solid var(--border-strong); font-size:0.82rem; letter-spacing:0.08em; text-align:center;">${lang.ready_msg}</div>
     </div>
     ${tsWidget}
-    <button class="btn" onclick="unlockM()" id="btnM" ${turnstileSiteKey ? 'disabled' : ''}><span>${lang.btn_decrypt}</span><div class="spinner"></div></button>
-    <button class="btn hidden" onclick="unlockA()" id="btnA" ${turnstileSiteKey ? 'disabled' : ''}><span>${lang.btn_open}</span><div class="spinner"></div></button>
+    <button class="btn${turnstileSiteKey ? ' hidden' : ''}" onclick="unlockM()" id="btnM"><span>${lang.btn_decrypt}</span><div class="spinner"></div></button>
+    <button class="btn hidden" onclick="unlockA()" id="btnA"><span>${lang.btn_open}</span><div class="spinner"></div></button>
     <div id="v-decrypted" class="hidden">
       <div class="label-row">${lang.label_decrypted}</div>
       <pre id="content"></pre>
