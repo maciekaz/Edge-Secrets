@@ -23,6 +23,7 @@ type Bindings = {
   PEPPER: string
   CF_TEAM_DOMAIN: string
   CF_AUD: string
+  TURNSTILE_SECRET?: string
 }
 
 type Lang = Translations
@@ -79,7 +80,7 @@ interface UploadCompleteBody {
 const HTML_SECURITY_HEADERS: Record<string, string> = {
   'Content-Type': 'text/html;charset=UTF-8',
   'Content-Security-Policy':
-    "default-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data:; object-src 'none'; frame-ancestors 'none';",
+    "default-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com; script-src 'unsafe-inline' https://challenges.cloudflare.com; style-src 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data:; connect-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; object-src 'none'; frame-ancestors 'none';",
   'X-Frame-Options': 'DENY',
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer',
@@ -140,6 +141,21 @@ const hashPwd = async (p: string | null | undefined, pepper: string): Promise<st
   return Array.from(new Uint8Array(buf))
     .map((x) => x.toString(16).padStart(2, '0'))
     .join('')
+}
+
+async function verifyTurnstile(token: string, secret: string): Promise<boolean> {
+  try {
+    const res = await fetch('https://challenges.cloudflare.com/turnstile/v1/siteverify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ secret, response: token }),
+    })
+    if (!res.ok) return false
+    const data = await res.json<{ success: boolean }>()
+    return data.success === true
+  } catch {
+    return false
+  }
 }
 
 // RFC 5987 percent-encoding for Content-Disposition filename — prevents header injection
@@ -281,16 +297,22 @@ app.get('/gen', (c) => {
   return c.html(renderGen(c.req.query('t') ?? 'cred', t, code), 200, HTML_SECURITY_HEADERS)
 })
 
-app.get('/receive/:id', (c) => {
+app.get('/receive/:id', async (c) => {
   const { t, code } = getLang(c.req.raw)
+  const [tsEnabled, tsSiteKey] = await Promise.all([
+    c.env.SECRETS_STORE.get('ui:turnstile_creds'),
+    c.env.SECRETS_STORE.get('ui:turnstile_site_key'),
+  ])
+  const turnstileActive = tsEnabled === '1' && !!tsSiteKey && !!c.env.TURNSTILE_SECRET
   return c.html(
-    renderReceiveCred(c.req.param('id'), t, code),
+    renderReceiveCred(c.req.param('id'), t, code, turnstileActive ? tsSiteKey! : null),
     200,
     HTML_SECURITY_HEADERS
   )
 })
 
 app.get('/share/:id', (c) => handleFileDownload(c))
+app.post('/share/:id', (c) => handleFilePost(c))
 
 // QR code generator — public, server-side SVG rendering
 app.get('/ui/qr', (c) => {
@@ -328,17 +350,23 @@ app.get('/ui/qr', (c) => {
 
 // Global UI config — public read, protected write
 app.get('/ui/config', async (c) => {
-  const [accent, bg, brand, tagline] = await Promise.all([
+  const [accent, bg, brand, tagline, tsSiteKey, tsCreds, tsFiles] = await Promise.all([
     c.env.SECRETS_STORE.get('ui:accent'),
     c.env.SECRETS_STORE.get('ui:bg'),
     c.env.SECRETS_STORE.get('ui:brand'),
     c.env.SECRETS_STORE.get('ui:tagline'),
+    c.env.SECRETS_STORE.get('ui:turnstile_site_key'),
+    c.env.SECRETS_STORE.get('ui:turnstile_creds'),
+    c.env.SECRETS_STORE.get('ui:turnstile_files'),
   ])
   return c.json({
     accent:  accent  ?? '#818cf8',
     bg:      bg      ?? '#000000',
     brand:   brand   ?? null,
     tagline: tagline ?? null,
+    turnstileSiteKey: tsSiteKey ?? null,
+    turnstileCreds:   tsCreds === '1',
+    turnstileFiles:   tsFiles === '1',
   })
 })
 
@@ -359,6 +387,29 @@ app.post('/api/ui/config', requireAccess, async (c) => {
     body.bg      ? c.env.SECRETS_STORE.put('ui:bg', body.bg)           : Promise.resolve(),
     body.brand   !== undefined ? (body.brand   ? c.env.SECRETS_STORE.put('ui:brand', body.brand)     : c.env.SECRETS_STORE.delete('ui:brand'))   : Promise.resolve(),
     body.tagline !== undefined ? (body.tagline ? c.env.SECRETS_STORE.put('ui:tagline', body.tagline) : c.env.SECRETS_STORE.delete('ui:tagline')) : Promise.resolve(),
+  ])
+  return c.json({ ok: true })
+})
+
+// Turnstile settings — site key (public) + per-feature toggles
+app.post('/api/ui/turnstile', requireAccess, async (c) => {
+  const body = await c.req.json<{ siteKey?: string | null; creds?: boolean; files?: boolean }>()
+  if (body.siteKey !== undefined && body.siteKey !== null && typeof body.siteKey !== 'string') {
+    return c.json({ error: 'Invalid siteKey' }, 400)
+  }
+  if (body.siteKey !== undefined && body.siteKey !== null && body.siteKey.length > 128) {
+    return c.json({ error: 'Site key too long' }, 400)
+  }
+  await Promise.all([
+    body.siteKey !== undefined
+      ? (body.siteKey ? c.env.SECRETS_STORE.put('ui:turnstile_site_key', body.siteKey) : c.env.SECRETS_STORE.delete('ui:turnstile_site_key'))
+      : Promise.resolve(),
+    body.creds !== undefined
+      ? c.env.SECRETS_STORE.put('ui:turnstile_creds', body.creds ? '1' : '0')
+      : Promise.resolve(),
+    body.files !== undefined
+      ? c.env.SECRETS_STORE.put('ui:turnstile_files', body.files ? '1' : '0')
+      : Promise.resolve(),
   ])
   return c.json({ ok: true })
 })
@@ -479,7 +530,17 @@ app.post('/api/store', async (c) => {
 // Retrieve encrypted secret from KV (verifier check + burn-on-read)
 app.post('/api/retrieve/:id', async (c) => {
   const id = c.req.param('id')
-  const { verifierCandidate } = await c.req.json<{ verifierCandidate: string }>()
+  const body = await c.req.json<{ verifierCandidate: string; cfTurnstileToken?: string }>()
+  const { verifierCandidate } = body
+
+  // Turnstile verification — runs before any KV access
+  const tsEnabled = await c.env.SECRETS_STORE.get('ui:turnstile_creds')
+  if (tsEnabled === '1' && c.env.TURNSTILE_SECRET) {
+    const token = body.cfTurnstileToken ?? ''
+    const valid = await verifyTurnstile(token, c.env.TURNSTILE_SECRET)
+    if (!valid) return c.json({ error: 'CHALLENGE_FAILED' }, 403)
+  }
+
   const { value, metadata } =
     await c.env.SECRETS_STORE.getWithMetadata<SecretMetadata>(id)
   if (!value || !metadata) {
@@ -582,7 +643,7 @@ app.onError((err, c) => {
   return c.text('Internal Server Error', 500)
 })
 
-// ── File Download Handler ─────────────────────────────────────────────────────
+// ── File Download Handlers ────────────────────────────────────────────────────
 
 async function handleFileDownload(c: Context<{ Bindings: Bindings }>): Promise<Response> {
   const id = c.req.param('id')
@@ -598,6 +659,22 @@ async function handleFileDownload(c: Context<{ Bindings: Bindings }>): Promise<R
     return c.html('LINK_EXPIRED', 410, HTML_SECURITY_HEADERS)
   }
 
+  // Check Turnstile settings — if active, always show gate page (Option B)
+  const [tsEnabled, tsSiteKey] = await Promise.all([
+    env.SECRETS_STORE.get('ui:turnstile_files'),
+    env.SECRETS_STORE.get('ui:turnstile_site_key'),
+  ])
+  const turnstileActive = tsEnabled === '1' && !!tsSiteKey && !!env.TURNSTILE_SECRET
+
+  if (turnstileActive) {
+    return c.html(
+      renderFileTurnstileGate(id, f.filename, !!f.password_hash, lang, langCode, tsSiteKey!, false),
+      200,
+      HTML_SECURITY_HEADERS
+    )
+  }
+
+  // Legacy path (no Turnstile): password check via query param
   if (f.password_hash) {
     const pwdParam = c.req.query('pwd')
     if (!pwdParam) {
@@ -617,6 +694,71 @@ async function handleFileDownload(c: Context<{ Bindings: Bindings }>): Promise<R
     }
   }
 
+  return serveFile(c, id, f)
+}
+
+async function handleFilePost(c: Context<{ Bindings: Bindings }>): Promise<Response> {
+  const id = c.req.param('id')
+  if (!id) return c.text('BAD_REQUEST', 400)
+  const env = c.env
+  const { t: lang, code: langCode } = getLang(c.req.raw)
+
+  const f = await env.DB.prepare('SELECT * FROM files WHERE id=?')
+    .bind(id)
+    .first<FileRecord>()
+  if (!f) return c.html('FILE_NOT_FOUND', 404, HTML_SECURITY_HEADERS)
+  if (f.status === 'downloaded' || f.expires_at < Date.now()) {
+    return c.html('LINK_EXPIRED', 410, HTML_SECURITY_HEADERS)
+  }
+
+  const form = await c.req.formData()
+  const tsToken = form.get('cf-turnstile-response') as string | null
+  const pwdParam = form.get('pwd') as string | null
+
+  // Verify Turnstile token
+  const [tsEnabled, tsSiteKey] = await Promise.all([
+    env.SECRETS_STORE.get('ui:turnstile_files'),
+    env.SECRETS_STORE.get('ui:turnstile_site_key'),
+  ])
+  const turnstileActive = tsEnabled === '1' && !!tsSiteKey && !!env.TURNSTILE_SECRET
+
+  if (turnstileActive) {
+    const valid = await verifyTurnstile(tsToken ?? '', env.TURNSTILE_SECRET!)
+    if (!valid) {
+      // Redirect back to GET — fresh challenge
+      return new Response(null, { status: 303, headers: { Location: `/share/${id}` } })
+    }
+  }
+
+  // Password check
+  if (f.password_hash) {
+    if (!pwdParam) {
+      return c.html(
+        renderFileTurnstileGate(id, f.filename, true, lang, langCode, tsSiteKey ?? '', false),
+        403,
+        HTML_SECURITY_HEADERS
+      )
+    }
+    if ((await hashPwd(pwdParam, env.PEPPER)) !== f.password_hash) {
+      const att = (f.failed_attempts ?? 0) + 1
+      if (att >= CONFIG.maxAttempts) {
+        c.executionCtx.waitUntil(env.BUCKET.delete(id))
+        await env.DB.prepare('DELETE FROM files WHERE id=?').bind(id).run()
+        return c.text('FILE_DELETED', 410)
+      }
+      await env.DB.prepare('UPDATE files SET failed_attempts=? WHERE id=?')
+        .bind(att, id)
+        .run()
+      // Re-render gate with error (fresh challenge needed)
+      return new Response(null, { status: 303, headers: { Location: `/share/${id}?err=1` } })
+    }
+  }
+
+  return serveFile(c, id, f)
+}
+
+async function serveFile(c: Context<{ Bindings: Bindings }>, id: string, f: FileRecord): Promise<Response> {
+  const env = c.env
   const curDL = (f.download_count ?? 0) + 1
   const shouldBurn = f.max_downloads !== -1 && curDL >= f.max_downloads
 
@@ -778,7 +920,16 @@ footer{margin-top:28px;color:var(--text-dim);font-size:0.7rem;text-align:center;
 [data-theme="light"]{--bg:#eeeef5;--surface:#f8f8fc;--surface-2:#e4e4ee;--surface-3:#d8d8e8;--text:#14141e;--text-muted:rgba(20,20,30,0.45);--text-dim:rgba(20,20,30,0.22);--border:rgba(0,0,0,0.08);--border-strong:rgba(0,0,0,0.14)}
 .theme-toggle{position:fixed;top:18px;left:18px;z-index:10;width:32px;height:32px;display:flex;align-items:center;justify-content:center;cursor:pointer;border:1px solid var(--border);background:var(--surface);color:var(--text-muted);font-size:14px;transition:color 0.2s,border-color 0.2s}
 .theme-toggle:hover{color:var(--accent);border-color:var(--accent)}
-${LANG_PICKER_CSS}`
+${LANG_PICKER_CSS}
+.ts-toggle-row{display:flex;align-items:center;justify-content:space-between;margin-top:8px}
+.ts-toggle{position:relative;width:36px;height:20px;flex-shrink:0}
+.ts-toggle input{opacity:0;width:0;height:0;position:absolute}
+.ts-track{position:absolute;inset:0;background:var(--border-strong);border-radius:20px;cursor:pointer;transition:background 0.2s}
+.ts-toggle input:checked+.ts-track{background:var(--accent)}
+.ts-thumb{position:absolute;top:3px;left:3px;width:14px;height:14px;background:#fff;border-radius:50%;transition:transform 0.2s;pointer-events:none}
+.ts-toggle input:checked~.ts-thumb{transform:translateX(16px)}
+.ts-verify-wrap{text-align:center;padding:20px 0 10px}
+.ts-verify-label{font-size:0.65rem;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;color:var(--text-muted);margin-bottom:16px;display:block}`
 
 const CLIENT_JS = `
 <script>
@@ -837,6 +988,16 @@ function saveConfig(){
         .then(function(){if(btn){btn.textContent=window.L.js_saved;btn.classList.add('saved');setTimeout(function(){btn.textContent=window.L.js_save;btn.classList.remove('saved');btn.disabled=false;},2000);}})
         .catch(function(){if(btn){btn.textContent=window.L.js_error;btn.disabled=false;setTimeout(function(){btn.textContent=window.L.js_save;},2000);}});
 }
+function saveTurnstile(){
+    var sk=(get('cfgTsSiteKey')||{value:''}).value.trim();
+    var creds=!!(get('cfgTsCreds')||{}).checked;
+    var files=!!(get('cfgTsFiles')||{}).checked;
+    var btn=get('cfgTsSave');if(btn){btn.disabled=true;btn.textContent='...';}
+    fetch('/api/ui/turnstile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({siteKey:sk||null,creds:creds,files:files})})
+        .then(function(r){return r.json();})
+        .then(function(){if(btn){btn.textContent=window.L.js_saved;btn.classList.add('saved');setTimeout(function(){btn.textContent=window.L.js_save;btn.classList.remove('saved');btn.disabled=false;},2000);}})
+        .catch(function(){if(btn){btn.textContent=window.L.js_error;btn.disabled=false;setTimeout(function(){btn.textContent=window.L.js_save;},2000);}});
+}
 function uploadLogo(){
     var input=get('logoInput');if(!input||!input.files.length)return;var file=input.files[0];
     if(file.size>262144){modal(window.L.js_error,window.L.js_logo_max);return;}
@@ -884,6 +1045,9 @@ async function shorten(){
         _applyBranding(cfg.brand||'',cfg.tagline||'');
         var ni=get('cfgBrandName');if(ni&&cfg.brand)ni.value=cfg.brand;
         var ti=get('cfgTagline');if(ti&&cfg.tagline)ti.value=cfg.tagline;
+        var tsk=get('cfgTsSiteKey');if(tsk&&cfg.turnstileSiteKey)tsk.value=cfg.turnstileSiteKey;
+        var tc=get('cfgTsCreds');if(tc)tc.checked=!!cfg.turnstileCreds;
+        var tf=get('cfgTsFiles');if(tf)tf.checked=!!cfg.turnstileFiles;
     }).catch(function(){});
     var bh=document.querySelector('.brand-header');
     if(bh){
@@ -1034,7 +1198,9 @@ async function start(p, bid) {
     try {
         const id = location.pathname.split('/').pop();
         const vf = await derive(p, id, 'v');
-        const res = await fetch('/api/retrieve/' + id, { method: 'POST', body: JSON.stringify({ verifierCandidate: vf }) });
+        const payload = { verifierCandidate: vf };
+        if (_tsToken) payload.cfTurnstileToken = _tsToken;
+        const res = await fetch('/api/retrieve/' + id, { method: 'POST', body: JSON.stringify(payload) });
         const json = await res.json();
         if (!res.ok) throw new Error(json.error);
         const d = JSON.parse(json.encryptedData);
@@ -1060,6 +1226,17 @@ async function start(p, bid) {
         setInterval(tick, 1000);
         tick();
     } catch (e) { modal(window.L.js_error, e.message); } finally { setL(get(bid), 0); }
+}
+
+var _tsToken = null;
+function onTurnstileSuccess(token) {
+  _tsToken = token;
+  var btnM = get('btnM'), btnA = get('btnA');
+  if (btnA && !btnA.classList.contains('hidden') && document.getElementById('m-auto') && !document.getElementById('m-auto').classList.contains('hidden')) {
+    unlockA();
+  } else if (btnM) {
+    btnM.disabled = false;
+  }
 }
 
 const unlockM = () => start(get('recvP').value, 'btnM');
@@ -1222,14 +1399,38 @@ function renderGen(type: string, t: Translations, langCode: LangCode): string {
       <input type="file" id="logoInput" accept="image/png,image/svg+xml,image/jpeg,image/webp" style="display:none" onchange="uploadLogo()">
     </div>
     <div class="cfg-divider"></div>
+    <div class="cfg-section">
+      <div class="cfg-section-label">${t.cfg_turnstile}</div>
+      <div class="cfg-row" style="margin-bottom:8px">
+        <span class="cfg-label">${t.cfg_turnstile_site_key}</span>
+        <input type="text" class="cfg-input" id="cfgTsSiteKey" placeholder="0x4AAAAAAA..." maxlength="128">
+      </div>
+      <div class="ts-toggle-row">
+        <span class="cfg-label">${t.cfg_turnstile_creds}</span>
+        <label class="ts-toggle"><input type="checkbox" id="cfgTsCreds"><span class="ts-track"></span><span class="ts-thumb"></span></label>
+      </div>
+      <div class="ts-toggle-row" style="margin-top:6px">
+        <span class="cfg-label">${t.cfg_turnstile_files}</span>
+        <label class="ts-toggle"><input type="checkbox" id="cfgTsFiles"><span class="ts-track"></span><span class="ts-thumb"></span></label>
+      </div>
+      <button class="cfg-save" id="cfgTsSave" style="margin-top:10px" onclick="saveTurnstile()">${t.js_save}</button>
+    </div>
+    <div class="cfg-divider"></div>
     <button class="cfg-save" id="cfgSave" onclick="saveConfig()">${t.js_save}</button>
   </div>`
   return BASE_HTML(body, langCode, lp)
 }
 
-function renderReceiveCred(_id: string, lang: Lang, langCode: LangCode): string {
+function renderReceiveCred(_id: string, lang: Lang, langCode: LangCode, turnstileSiteKey: string | null): string {
   const lp = renderLangPicker(langCode)
+  const tsWidget = turnstileSiteKey
+    ? `<div class="ts-verify-wrap"><span class="ts-verify-label">${lang.ts_verify}</span><div class="cf-turnstile" data-sitekey="${escapeHtml(turnstileSiteKey)}" data-callback="onTurnstileSuccess" data-theme="auto"></div></div>`
+    : ''
+  const tsScript = turnstileSiteKey
+    ? `<script src="https://challenges.cloudflare.com/turnstile/v1/api.js" async defer></script>`
+    : ''
   const body = `
+  ${tsScript}
   <script>window.L = ${JSON.stringify(lang)};</script>
   <div class="card">
     <div class="brand-header"><span class="brand-logo">EDGE SECRETS</span></div>
@@ -1237,11 +1438,13 @@ function renderReceiveCred(_id: string, lang: Lang, langCode: LangCode): string 
     <div id="m-manual">
       <div class="label-row">${lang.label_key}</div>
       <input type="password" id="recvP" placeholder="${lang.placeholder_key}">
-      <button class="btn" onclick="unlockM()" id="btnM"><span>${lang.btn_decrypt}</span><div class="spinner"></div></button>
+      ${tsWidget}
+      <button class="btn" onclick="unlockM()" id="btnM" ${turnstileSiteKey ? 'disabled' : ''}><span>${lang.btn_decrypt}</span><div class="spinner"></div></button>
     </div>
     <div id="m-auto" class="hidden" style="text-align:center">
       <div style="background:var(--accent-dim); padding:18px; font-weight:600; margin-bottom:20px; color:var(--accent); border:1px solid var(--border-strong); font-size:0.82rem; letter-spacing:0.08em; text-align:center;">${lang.ready_msg}</div>
-      <button class="btn" onclick="unlockA()" id="btnA"><span>${lang.btn_open}</span><div class="spinner"></div></button>
+      ${tsWidget}
+      <button class="btn" onclick="unlockA()" id="btnA" ${turnstileSiteKey ? 'disabled' : ''}><span>${lang.btn_open}</span><div class="spinner"></div></button>
     </div>
     <div id="v-decrypted" class="hidden">
       <div class="label-row">${lang.label_decrypted}</div>
@@ -1274,5 +1477,50 @@ function renderReceiveFile(filename: string, lang: Lang, langCode: LangCode): st
           <button class="btn"><span>${lang.btn_unlock}</span></button>
       </form>
   </div><div id="ov" class="overlay"><div class="modal"><h3 id="mT"></h3><p id="mMsg"></p><button class="modal-btn" onclick="get('ov').style.display='none'">OK</button></div></div>`
+  return BASE_HTML(body, langCode, lp)
+}
+
+function renderFileTurnstileGate(
+  id: string,
+  filename: string,
+  hasPassword: boolean,
+  lang: Lang,
+  langCode: LangCode,
+  siteKey: string,
+  _showError: boolean
+): string {
+  const safeName = escapeHtml(filename) as string
+  const safeSiteKey = escapeHtml(siteKey) as string
+  const lp = renderLangPicker(langCode)
+  const passwordField = hasPassword
+    ? `<input type="password" name="pwd" id="p" placeholder="${lang.placeholder_key}" style="margin-top:14px">`
+    : ''
+  const body = `
+  <script src="https://challenges.cloudflare.com/turnstile/v1/api.js" async defer></script>
+  <script>window.L = ${JSON.stringify(lang)};</script>
+  <div class="card">
+      <div class="brand-header"><span class="brand-logo" id="brandName">EDGE SECRETS</span><p class="brand-tagline" id="brandTagline" style="display:none"></p></div>
+      <h2 style="text-align:center; font-size:1.1rem; margin-bottom:24px; color:var(--text); font-weight:600; letter-spacing:0.04em;">${lang.title_file}</h2>
+      <div style="text-align:center; padding:20px 0 10px;">
+          <div style="font-size:3rem; margin-bottom:15px;">\u{1F4E6}</div>
+          <h2 style="border:none; margin:0; font-size:1.3rem; word-break:break-all; font-weight:600; color:var(--text)">${safeName}</h2>
+          ${hasPassword ? `<p style="font-size:0.9rem; font-weight:500; color:var(--text-muted); margin-top:5px">${lang.file_protected}</p>` : ''}
+      </div>
+      <form id="dlForm" method="POST" action="/share/${id}" style="margin-top:10px">
+          <div class="ts-verify-wrap">
+              <span class="ts-verify-label">${lang.ts_verify}</span>
+              <div class="cf-turnstile" data-sitekey="${safeSiteKey}" data-callback="onTsFile" data-theme="auto"></div>
+          </div>
+          ${passwordField}
+          <button class="btn" id="btnDl" style="margin-top:14px" ${hasPassword ? 'disabled' : ''}><span>${lang.btn_unlock}</span></button>
+      </form>
+  </div><div id="ov" class="overlay"><div class="modal"><h3 id="mT"></h3><p id="mMsg"></p><button class="modal-btn" onclick="get('ov').style.display='none'">OK</button></div></div>
+  <script>
+  function onTsFile() {
+    var btn = document.getElementById('btnDl');
+    if (btn) btn.disabled = false;
+    if (!${hasPassword}) document.getElementById('dlForm').submit();
+  }
+  </script>`
   return BASE_HTML(body, langCode, lp)
 }
