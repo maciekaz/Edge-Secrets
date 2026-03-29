@@ -321,6 +321,8 @@ npx wrangler secret put TURNSTILE_SECRET
 npx wrangler deploy
 ```
 
+> **Cron trigger** - the hourly cleanup job (`0 * * * *`) is already defined in `wrangler.toml` and is deployed automatically with the command above. No manual setup needed. It deletes expired files from R2 and D1 every hour. You can verify it was registered under **Workers & Pages → your worker → Triggers** in the Cloudflare dashboard.
+
 ---
 
 ### Local Development
