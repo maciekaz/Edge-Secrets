@@ -2,6 +2,13 @@
 
 Secure, one-time sharing of passwords, files and links - built on Cloudflare Workers.
 <img width="1280" height="684" alt="image" src="https://github.com/user-attachments/assets/a39e4cf2-01ba-4a8c-9f36-42dada1c6c9f" />
+
+## Quick deployment
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/maciekaz/edge-secrets)
+
+(Read instructions at the end of this page!)
+
 ## Features
 
 | Feature | Details |
@@ -240,8 +247,44 @@ API endpoints are grouped under `/api/v1/` in two zones. Cloudflare Access needs
 > `/ui/config` and `/ui/logo` (GET) are outside `/api/v1/` so CF Access policies don't block public clients.
 
 ---
+## Quick deploy
 
-## Deploy
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/maciekaz/edge-secrets)
+
+Deploy with one click, then complete the required post-deploy setup below.
+
+### Post-deploy required steps
+
+1. Create/bind Cloudflare resources:
+   - KV namespace: `SECRETS_STORE`
+   - D1 database: `DB`
+   - R2 bucket: `BUCKET`
+
+2. Initialize D1 schema (table: `files`).
+
+3. Set required Worker secrets:
+   - `PEPPER`
+   - `CF_TEAM_DOMAIN`
+   - `CF_AUD`
+   - Optional: `TURNSTILE_SECRET`
+
+4. Configure Cloudflare Access policies for:
+   - `/gen`
+   - `/api/v1/admin/*`
+
+5. Keep these routes public (no Access policy):
+   - `/api/v1/public/*`
+   - `/ui/config`
+   - `/ui/logo`
+   - `/ui/qr`
+   - `/s/*`
+
+6. Deploy and verify:
+   - Open `/gen` (protected)
+   - Open `/receive/:id` and `/share/:id` (public)
+  
+   
+## Another way of deployment
 
 ### 1. Clone and install
 
