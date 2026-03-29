@@ -1224,13 +1224,14 @@ async function start(p, bid) {
 }
 
 var _tsToken = null;
+var _autoMode = false;
 function onTurnstileSuccess(token) {
   _tsToken = token;
-  var btnM = get('btnM'), btnA = get('btnA');
-  if (btnA && !btnA.classList.contains('hidden') && document.getElementById('m-auto') && !document.getElementById('m-auto').classList.contains('hidden')) {
+  if (_autoMode) {
     unlockA();
-  } else if (btnM) {
-    btnM.disabled = false;
+  } else {
+    var btnM = get('btnM');
+    if (btnM) btnM.disabled = false;
   }
 }
 
@@ -1238,9 +1239,12 @@ const unlockM = () => start(get('recvP').value, 'btnM');
 const unlockA = () => start(decodeURIComponent(location.hash.substring(1)), 'btnA');
 
 if (location.pathname === '/gen' && location.search.includes('t=file')) loadS();
-if (location.hash.length > 1 && get('m-auto')) {
+if (location.hash.length > 1 && get('btnA')) {
+    _autoMode = true;
     get('m-manual').classList.add('hidden');
     get('m-auto').classList.remove('hidden');
+    get('btnM').classList.add('hidden');
+    get('btnA').classList.remove('hidden');
 }
 ${LANG_PICKER_JS}
 </script>
@@ -1432,14 +1436,13 @@ function renderReceiveCred(_id: string, lang: Lang, langCode: LangCode, turnstil
     <div id="m-manual">
       <div class="label-row">${lang.label_key}</div>
       <input type="password" id="recvP" placeholder="${lang.placeholder_key}">
-      ${tsWidget}
-      <button class="btn" onclick="unlockM()" id="btnM" ${turnstileSiteKey ? 'disabled' : ''}><span>${lang.btn_decrypt}</span><div class="spinner"></div></button>
     </div>
     <div id="m-auto" class="hidden" style="text-align:center">
       <div style="background:var(--accent-dim); padding:18px; font-weight:600; margin-bottom:20px; color:var(--accent); border:1px solid var(--border-strong); font-size:0.82rem; letter-spacing:0.08em; text-align:center;">${lang.ready_msg}</div>
-      ${tsWidget}
-      <button class="btn" onclick="unlockA()" id="btnA" ${turnstileSiteKey ? 'disabled' : ''}><span>${lang.btn_open}</span><div class="spinner"></div></button>
     </div>
+    ${tsWidget}
+    <button class="btn" onclick="unlockM()" id="btnM" ${turnstileSiteKey ? 'disabled' : ''}><span>${lang.btn_decrypt}</span><div class="spinner"></div></button>
+    <button class="btn hidden" onclick="unlockA()" id="btnA" ${turnstileSiteKey ? 'disabled' : ''}><span>${lang.btn_open}</span><div class="spinner"></div></button>
     <div id="v-decrypted" class="hidden">
       <div class="label-row">${lang.label_decrypted}</div>
       <pre id="content"></pre>
