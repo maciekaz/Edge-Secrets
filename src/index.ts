@@ -982,19 +982,14 @@ function saveConfig(){
     var bg=_customBg;
     var brand=(get('cfgBrandName')||{value:''}).value.trim();
     var tagline=(get('cfgTagline')||{value:''}).value.trim();
-    var btn=get('cfgSave');if(btn){btn.disabled=true;btn.textContent='...';}
-    fetch('/api/ui/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({accent:accent,bg:bg,brand:brand||null,tagline:tagline||null})})
-        .then(function(r){return r.json();})
-        .then(function(){if(btn){btn.textContent=window.L.js_saved;btn.classList.add('saved');setTimeout(function(){btn.textContent=window.L.js_save;btn.classList.remove('saved');btn.disabled=false;},2000);}})
-        .catch(function(){if(btn){btn.textContent=window.L.js_error;btn.disabled=false;setTimeout(function(){btn.textContent=window.L.js_save;},2000);}});
-}
-function saveTurnstile(){
     var sk=(get('cfgTsSiteKey')||{value:''}).value.trim();
-    var creds=!!(get('cfgTsCreds')||{}).checked;
-    var files=!!(get('cfgTsFiles')||{}).checked;
-    var btn=get('cfgTsSave');if(btn){btn.disabled=true;btn.textContent='...';}
-    fetch('/api/ui/turnstile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({siteKey:sk||null,creds:creds,files:files})})
-        .then(function(r){return r.json();})
+    var tsCreds=!!(get('cfgTsCreds')||{}).checked;
+    var tsFiles=!!(get('cfgTsFiles')||{}).checked;
+    var btn=get('cfgSave');if(btn){btn.disabled=true;btn.textContent='...';}
+    Promise.all([
+        fetch('/api/ui/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({accent:accent,bg:bg,brand:brand||null,tagline:tagline||null})}),
+        fetch('/api/ui/turnstile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({siteKey:sk||null,creds:tsCreds,files:tsFiles})})
+    ])
         .then(function(){if(btn){btn.textContent=window.L.js_saved;btn.classList.add('saved');setTimeout(function(){btn.textContent=window.L.js_save;btn.classList.remove('saved');btn.disabled=false;},2000);}})
         .catch(function(){if(btn){btn.textContent=window.L.js_error;btn.disabled=false;setTimeout(function(){btn.textContent=window.L.js_save;},2000);}});
 }
@@ -1413,7 +1408,6 @@ function renderGen(type: string, t: Translations, langCode: LangCode): string {
         <span class="cfg-label">${t.cfg_turnstile_files}</span>
         <label class="ts-toggle"><input type="checkbox" id="cfgTsFiles"><span class="ts-track"></span><span class="ts-thumb"></span></label>
       </div>
-      <button class="cfg-save" id="cfgTsSave" style="margin-top:10px" onclick="saveTurnstile()">${t.js_save}</button>
     </div>
     <div class="cfg-divider"></div>
     <button class="cfg-save" id="cfgSave" onclick="saveConfig()">${t.js_save}</button>
