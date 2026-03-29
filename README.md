@@ -291,7 +291,7 @@ npx wrangler d1 execute secret-db --remote --command \
 
 ### 3. Set Cloudflare Secrets
 
-None of these go into the repo or `wrangler.toml`. The Worker won't start without all three.
+None of these go into the repo or `wrangler.toml`. The Worker won't start without the first three.
 
 ```bash
 # 1. Global pepper for file password hashes (generate a random one)
@@ -304,7 +304,13 @@ npx wrangler secret put CF_TEAM_DOMAIN
 # 3. Application Audience (AUD) tag
 # Found at: CF Zero Trust → Access → Applications → (app) → Overview → AUD Tag
 npx wrangler secret put CF_AUD
+
+# 4. Turnstile secret key (optional - only if you want bot protection)
+# Found at: Cloudflare Dashboard → Turnstile → your site → Secret Key
+npx wrangler secret put TURNSTILE_SECRET
 ```
+
+> If `TURNSTILE_SECRET` is not set, Turnstile is silently disabled even if the KV toggles are on - no lockout, no errors.
 
 > Make sure you have a CF Zero Trust **Access Policy** configured for only **two paths**: `/gen` and `/api/v1/admin/*`. Do **not** include `/ui/config`, `/ui/logo`, `/ui/qr`, `/s/`, or `/api/v1/public/*` - these must remain public.
 
@@ -324,6 +330,9 @@ Create a `.dev.vars` file (git-ignored):
 PEPPER=local-pepper-for-testing-only
 CF_TEAM_DOMAIN=yourteam.cloudflareaccess.com
 CF_AUD=your-aud-tag
+
+# Optional - use Cloudflare's always-pass test key for local Turnstile testing
+TURNSTILE_SECRET=1x0000000000000000000000000000000AA
 ```
 
 > In local dev, requests don't go through CF Access - protected endpoints require a JWT passed manually via the `Cf-Access-Jwt-Assertion` header.
