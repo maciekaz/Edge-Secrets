@@ -60,7 +60,7 @@ All UI text is managed in `src/i18n.ts` - a self-contained module with no extern
 1. Open `src/i18n.ts`.
 2. Add the new code to the `LangCode` union type:
    ```ts
-   export type LangCode = 'en' | 'pl' | 'de' | 'fr' | 'es' | 'uk' | 'pt' | 'zh' | 'xx'
+   export type LangCode = 'en' | 'pl' | 'de' | 'fr' | 'es' | 'uk' | 'pt' | 'zh' | 'cs' | 'xx' 
    ```
 3. Add a full `Translations` object under the new key in the `I18N` record (~95 keys).
 4. Add an entry to `LANG_OPTIONS` in the same file:
