@@ -162,8 +162,8 @@ The Worker refuses to start if `PEPPER` is not set (`bindings guard`).
 
 ```mermaid
 flowchart TD
-    Browser -->|protected routes\n/gen, /api/store\n/api/stats, /api/upload/*\n/api/ui/config POST| CFA[Cloudflare Access\nJWT RS256 verification]
-    Browser -->|public routes\n/receive/:id, /share/:id\n/api/retrieve/:id\n/ui/config, /ui/logo| Worker
+    Browser -->|protected routes\n/gen\n/api/v1/admin/*| CFA[Cloudflare Access\nJWT RS256 verification]
+    Browser -->|public routes\n/receive/:id, /share/:id\n/api/v1/public/*\n/ui/config, /ui/logo| Worker
 
     CFA -->|verified request| Worker[Cloudflare Worker\nHono / TypeScript]
 
@@ -192,29 +192,46 @@ flowchart TD
 
 ## API Endpoints
 
-| Method | Path | Description | Access |
-|---|---|---|---|
-| `GET` | `/gen` | Secret & upload creation panel | 🔒 CF Access |
-| `POST` | `/api/store` | Save encrypted secret to KV | 🔒 CF Access |
-| `POST` | `/api/retrieve/:id` | Retrieve and burn secret | Public |
-| `GET` | `/receive/:id` | Secret retrieval page | Public |
-| `GET` | `/api/stats` | Storage statistics | 🔒 CF Access |
-| `POST` | `/api/upload/init` | Initiate multipart upload | 🔒 CF Access |
-| `PUT` | `/api/upload/part` | Upload file part | 🔒 CF Access |
-| `POST` | `/api/upload/complete` | Finalize upload | 🔒 CF Access |
-| `GET` | `/share/:id` | Download file | Public |
-| `DELETE` | `/api/del/:id` | Delete file | Public* |
-| `POST` | `/api/shorten` | Create short link (TTL + click limit) | 🔒 CF Access |
-| `GET` | `/s/:id` | Redirect to target URL | Public |
-| `GET` | `/ui/config` | Read global UI settings (accent, bg, brand, tagline) | Public |
-| `POST` | `/api/ui/config` | Update global UI settings | 🔒 CF Access |
-| `GET` | `/ui/logo` | Serve logo image from R2 | Public |
-| `POST` | `/api/ui/logo` | Upload logo (PNG/SVG/WebP, max 256 KB) | 🔒 CF Access |
-| `DELETE` | `/api/ui/logo` | Remove logo | 🔒 CF Access |
-| `GET` | `/ui/qr` | Generate QR code SVG for a given URL (`?d=encodedUrl`) | Public |
+API endpoints are grouped under `/api/v1/` in two zones. Cloudflare Access needs only **two rules**: `/gen` and `/api/v1/admin/*`.
 
-> *`/api/del` is intentionally outside CF Access.
-> `/ui/config` and `/ui/logo` (GET) live outside `/api/` so CF Access policies don't block public clients. Write operations (`POST /api/ui/*`, `DELETE /api/ui/*`) remain protected.
+### Admin Zone — `/api/v1/admin/` (🔒 CF Access)
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/gen` | Secret & upload creation panel |
+| `POST` | `/api/v1/admin/secrets` | Save encrypted secret to KV |
+| `GET` | `/api/v1/admin/stats` | Storage statistics + file list |
+| `POST` | `/api/v1/admin/files/init` | Initiate multipart upload |
+| `PUT` | `/api/v1/admin/files/part` | Upload file part |
+| `POST` | `/api/v1/admin/files/complete` | Finalize upload |
+| `POST` | `/api/v1/admin/links` | Create short link (TTL + click limit) |
+| `POST` | `/api/v1/admin/ui/config` | Update global UI settings |
+| `POST` | `/api/v1/admin/ui/turnstile` | Update Turnstile settings |
+| `POST` | `/api/v1/admin/ui/logo` | Upload logo (PNG/SVG/WebP, max 256 KB) |
+| `DELETE` | `/api/v1/admin/ui/logo` | Remove logo |
+
+### Public Zone — `/api/v1/public/` (No auth)
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/v1/public/secrets/:id/retrieve` | Retrieve and burn secret |
+| `DELETE` | `/api/v1/public/files/:id` | Delete file (uploader self-service) |
+
+### Public UI Routes (No auth)
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/receive/:id` | Secret retrieval page |
+| `GET` | `/share/:id` | File download / Turnstile gate |
+| `GET` | `/s/:id` | Redirect to target URL |
+| `GET` | `/ui/config` | Read global UI settings (accent, bg, brand, tagline) |
+| `GET` | `/ui/logo` | Serve logo image from R2 |
+| `GET` | `/ui/qr` | Generate QR code SVG for a given URL (`?d=encodedUrl`) |
+
+> Full request/response documentation: [docs/api.md](docs/api.md)
+>
+> `/api/v1/public/files/:id` (DELETE) is intentionally outside CF Access — used by the uploader to self-revoke a link.
+> `/ui/config` and `/ui/logo` (GET) are outside `/api/v1/` so CF Access policies don't block public clients.
 
 ---
 
@@ -287,7 +304,7 @@ npx wrangler secret put CF_TEAM_DOMAIN
 npx wrangler secret put CF_AUD
 ```
 
-> Make sure you have a CF Zero Trust **Access Policy** configured for the protected paths: `/gen`, `/api/store`, `/api/stats`, `/api/upload`, `/api/shorten`, `/api/ui/config`, `/api/ui/logo`. Do **not** include `/ui/config`, `/ui/logo`, `/ui/qr`, or `/s/` — these must remain public.
+> Make sure you have a CF Zero Trust **Access Policy** configured for only **two paths**: `/gen` and `/api/v1/admin/*`. Do **not** include `/ui/config`, `/ui/logo`, `/ui/qr`, `/s/`, or `/api/v1/public/*` — these must remain public.
 
 ### 4. Deploy
 
