@@ -143,12 +143,14 @@ const hashPwd = async (p: string | null | undefined, pepper: string): Promise<st
     .join('')
 }
 
-async function verifyTurnstile(token: string, secret: string): Promise<boolean> {
+async function verifyTurnstile(token: string, secret: string, remoteip?: string): Promise<boolean> {
   try {
+    const payload: Record<string, string> = { secret, response: token }
+    if (remoteip) payload.remoteip = remoteip
     const res = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ secret, response: token }),
+      body: JSON.stringify(payload),
     })
     if (!res.ok) return false
     const data = await res.json<{ success: boolean }>()
@@ -537,7 +539,8 @@ app.post('/api/retrieve/:id', async (c) => {
   const tsEnabled = await c.env.SECRETS_STORE.get('ui:turnstile_creds')
   if (tsEnabled === '1' && c.env.TURNSTILE_SECRET) {
     const token = body.cfTurnstileToken ?? ''
-    const valid = await verifyTurnstile(token, c.env.TURNSTILE_SECRET)
+    const ip = c.req.header('CF-Connecting-IP') ?? undefined
+    const valid = await verifyTurnstile(token, c.env.TURNSTILE_SECRET, ip)
     if (!valid) return c.json({ error: 'CHALLENGE_FAILED' }, 403)
   }
 
@@ -723,7 +726,8 @@ async function handleFilePost(c: Context<{ Bindings: Bindings }>): Promise<Respo
   const turnstileActive = tsEnabled === '1' && !!tsSiteKey && !!env.TURNSTILE_SECRET
 
   if (turnstileActive) {
-    const valid = await verifyTurnstile(tsToken ?? '', env.TURNSTILE_SECRET!)
+    const ip = c.req.header('CF-Connecting-IP') ?? undefined
+    const valid = await verifyTurnstile(tsToken ?? '', env.TURNSTILE_SECRET!, ip)
     if (!valid) {
       // Redirect back to GET — fresh challenge
       return new Response(null, { status: 303, headers: { Location: `/share/${id}` } })
@@ -733,6 +737,8 @@ async function handleFilePost(c: Context<{ Bindings: Bindings }>): Promise<Respo
   // Password check
   if (f.password_hash) {
     if (!pwdParam) {
+      // If Turnstile is not active this POST path shouldn't be reached normally — redirect to GET
+      if (!turnstileActive) return new Response(null, { status: 303, headers: { Location: `/share/${id}` } })
       return c.html(
         renderFileTurnstileGate(id, f.filename, true, lang, langCode, tsSiteKey ?? '', false),
         403,
