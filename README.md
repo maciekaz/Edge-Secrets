@@ -13,6 +13,54 @@ Secure, one-time sharing of passwords, files and links — built on Cloudflare W
 | **Dark / light mode** | System-detected per client, manually overridable |
 | **QR codes** | Server-rendered SVG QR on every output link — scan directly from desktop |
 | **CF Access** | All write/admin endpoints protected by Cloudflare Access + RS256 JWT verification |
+| **Internationalisation** | 8 languages, auto-detected per user, flag picker in the UI |
+
+---
+
+## Internationalisation (i18n)
+
+All UI text is managed in `src/i18n.ts` — a self-contained module with no external dependencies.
+
+### Supported languages
+
+| Code | Language |
+|------|----------|
+| `en` | English (default) |
+| `pl` | Polski |
+| `de` | Deutsch |
+| `fr` | Français |
+| `es` | Español |
+| `uk` | Українська |
+| `pt` | Português |
+| `zh` | 中文 (Simplified) |
+
+### Language resolution — per user, not global
+
+Each user's language is resolved independently on every request. Priority order:
+
+1. **Cookie `lang`** — set when the user picks a language via the flag picker (stored for 1 year, `SameSite=Lax`). This is the highest priority and persists across sessions.
+2. **`Accept-Language` header** — automatic browser locale, parsed and matched against supported codes.
+3. **Default: English** — used when neither source yields a supported code.
+
+Changing the language via the picker only affects the requesting user's browser — it has no effect on other users.
+
+### Flag picker
+
+A small flag button appears in the top-left corner of every page (next to the dark/light mode toggle). Clicking it opens a dropdown with all supported languages. Selecting one sets the `lang` cookie and reloads the page.
+
+### Adding a new language
+
+1. Open `src/i18n.ts`.
+2. Add the new code to the `LangCode` union type:
+   ```ts
+   export type LangCode = 'en' | 'pl' | 'de' | 'fr' | 'es' | 'uk' | 'pt' | 'zh' | 'xx'
+   ```
+3. Add a full `Translations` object under the new key in the `I18N` record (~95 keys).
+4. Add an entry to `LANG_OPTIONS` in the same file:
+   ```ts
+   { code: 'xx', flag: '🇽🇽', name: 'Language name' }
+   ```
+5. Deploy — no other files need to change.
 
 ---
 
