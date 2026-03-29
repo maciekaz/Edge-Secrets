@@ -54,19 +54,6 @@ All UI text is managed in `src/i18n.ts` - a self-contained module with no extern
 | `zh` | 中文 (Simplified) |
 | `cs` | Čeština |
 
-### Language resolution - per user, not global
-
-Each user's language is resolved independently on every request. Priority order:
-
-1. **Cookie `lang`** - set when the user picks a language via the flag picker (stored for 1 year, `SameSite=Lax`). This is the highest priority and persists across sessions.
-2. **`Accept-Language` header** - automatic browser locale, parsed and matched against supported codes.
-3. **Default: English** - used when neither source yields a supported code.
-
-Changing the language via the picker only affects the requesting user's browser - it has no effect on other users.
-
-### Flag picker
-
-A small flag button appears in the top-left corner of every page (next to the dark/light mode toggle). Clicking it opens a dropdown with all supported languages. Selecting one sets the `lang` cookie and reloads the page.
 
 ### How to add your own language
 
