@@ -154,6 +154,7 @@ The Worker refuses to start if `PEPPER` is not set (`bindings guard`).
 | **RFC 5987 filenames** | Safe percent-encoded `Content-Disposition` filenames (no header injection) |
 | **No content logging** | Errors return generic messages — no `e.message` leakage |
 | **Bindings guard** | Worker returns 500 on startup if any required binding is missing (DB, BUCKET, KV, PEPPER, CF_TEAM_DOMAIN, CF_AUD) |
+| **Turnstile** | Optional Cloudflare Turnstile (managed challenge) on secret retrieval and file downloads — blocks bots and brute-force before any KV/D1/R2 access; token bound to visitor IP via `remoteip`; failed challenge never increments the attempt counter. See [docs/turnstile.md](docs/turnstile.md). |
 
 ---
 
