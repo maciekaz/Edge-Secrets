@@ -24,7 +24,7 @@ If you believe you have found a security vulnerability in Edge Secrets (especial
 4. Provide details about the exploit, including steps to reproduce.
 
 ### What to expect:
-* I will review and acknowledge your report within 48 hours.
+* I will review and acknowledge your report within 14 days.
 * We will collaborate in the private advisory thread to confirm the vulnerability and develop a patch.
 * Once patched, you will be publicly credited in the release notes and the README (unless you prefer to remain anonymous).
 
