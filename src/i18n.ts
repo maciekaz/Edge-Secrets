@@ -113,6 +113,13 @@ export interface Translations {
 
   // ── Language picker ──
   lang_picker_title: string
+
+  // ── Turnstile ──
+  cfg_turnstile: string
+  cfg_turnstile_site_key: string
+  cfg_turnstile_creds: string
+  cfg_turnstile_files: string
+  ts_verify: string
 }
 
 // ── Translations ────────────────────────────────────────────────────────────
@@ -220,6 +227,12 @@ export const I18N: Record<LangCode, Translations> = {
     js_btn_delete: 'DELETE',
 
     lang_picker_title: 'Language',
+
+    cfg_turnstile: 'TURNSTILE',
+    cfg_turnstile_site_key: 'Site Key',
+    cfg_turnstile_creds: 'Protect secret retrieval',
+    cfg_turnstile_files: 'Protect file downloads',
+    ts_verify: 'SECURITY CHECK',
   },
 
   // ────────────────────────── Polski ──────────────────────────
@@ -323,6 +336,12 @@ export const I18N: Record<LangCode, Translations> = {
     js_btn_delete: 'USUŃ',
 
     lang_picker_title: 'Język',
+
+    cfg_turnstile: 'TURNSTILE',
+    cfg_turnstile_site_key: 'Site Key',
+    cfg_turnstile_creds: 'Chroń odbiór secretów',
+    cfg_turnstile_files: 'Chroń pobieranie plików',
+    ts_verify: 'WERYFIKACJA BEZPIECZEŃSTWA',
   },
 
   // ────────────────────────── Deutsch ──────────────────────────
@@ -426,6 +445,12 @@ export const I18N: Record<LangCode, Translations> = {
     js_btn_delete: 'LÖSCHEN',
 
     lang_picker_title: 'Sprache',
+
+    cfg_turnstile: 'TURNSTILE',
+    cfg_turnstile_site_key: 'Site Key',
+    cfg_turnstile_creds: 'Secrets schützen',
+    cfg_turnstile_files: 'Downloads schützen',
+    ts_verify: 'SICHERHEITSCHECK',
   },
 
   // ────────────────────────── Français ──────────────────────────
@@ -529,6 +554,12 @@ export const I18N: Record<LangCode, Translations> = {
     js_btn_delete: 'SUPPRIMER',
 
     lang_picker_title: 'Langue',
+
+    cfg_turnstile: 'TURNSTILE',
+    cfg_turnstile_site_key: 'Site Key',
+    cfg_turnstile_creds: 'Protéger la récupération',
+    cfg_turnstile_files: 'Protéger les téléchargements',
+    ts_verify: 'VÉRIFICATION DE SÉCURITÉ',
   },
 
   // ────────────────────────── Español ──────────────────────────
@@ -632,6 +663,12 @@ export const I18N: Record<LangCode, Translations> = {
     js_btn_delete: 'ELIMINAR',
 
     lang_picker_title: 'Idioma',
+
+    cfg_turnstile: 'TURNSTILE',
+    cfg_turnstile_site_key: 'Site Key',
+    cfg_turnstile_creds: 'Proteger recuperación',
+    cfg_turnstile_files: 'Proteger descargas',
+    ts_verify: 'VERIFICACIÓN DE SEGURIDAD',
   },
 
   // ────────────────────────── Українська ──────────────────────────
@@ -735,6 +772,12 @@ export const I18N: Record<LangCode, Translations> = {
     js_btn_delete: 'ВИДАЛИТИ',
 
     lang_picker_title: 'Мова',
+
+    cfg_turnstile: 'TURNSTILE',
+    cfg_turnstile_site_key: 'Site Key',
+    cfg_turnstile_creds: 'Захист отримання секретів',
+    cfg_turnstile_files: 'Захист завантажень файлів',
+    ts_verify: 'ПЕРЕВІРКА БЕЗПЕКИ',
   },
 
   // ────────────────────────── Português ──────────────────────────
@@ -838,6 +881,12 @@ export const I18N: Record<LangCode, Translations> = {
     js_btn_delete: 'EXCLUIR',
 
     lang_picker_title: 'Idioma',
+
+    cfg_turnstile: 'TURNSTILE',
+    cfg_turnstile_site_key: 'Site Key',
+    cfg_turnstile_creds: 'Proteger recuperação',
+    cfg_turnstile_files: 'Proteger downloads',
+    ts_verify: 'VERIFICAÇÃO DE SEGURANÇA',
   },
 
   // ────────────────────────── 中文 (简体) ──────────────────────────
@@ -941,6 +990,12 @@ export const I18N: Record<LangCode, Translations> = {
     js_btn_delete: '\u5220\u9664',
 
     lang_picker_title: '\u8BED\u8A00',
+
+    cfg_turnstile: 'TURNSTILE',
+    cfg_turnstile_site_key: '\u7AD9\u70B9\u5BC6\u94A5',
+    cfg_turnstile_creds: '\u4FDD\u62A4\u5BC6\u94A5\u83B7\u53D6',
+    cfg_turnstile_files: '\u4FDD\u62A4\u6587\u4EF6\u4E0B\u8F7D',
+    ts_verify: '\u5B89\u5168\u9A8C\u8BC1',
   },
 }
 
