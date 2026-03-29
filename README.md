@@ -16,6 +16,8 @@ Secure, one-time sharing of passwords, files and links - built on Cloudflare Wor
 | **Internationalisation** | 8 languages, auto-detected per user, flag picker in the UI |
 | **REST API** | Versioned `/api/v1/` - admin zone (`/api/v1/admin/*`) protected by CF Access, public zone (`/api/v1/public/*`) open; full docs in [docs/api.md](docs/api.md) |
 
+> **$0 to run.** The entire stack - Workers, KV, D1, R2, and Cloudflare Access (up to 50 users) - runs on Cloudflare's free tier. No credit card required, no infrastructure to manage. You only start paying if you exceed the free-tier request limits, which for a self-hosted internal tool is unlikely.
+
 ---
 
 ## Internationalisation (i18n)
