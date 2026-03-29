@@ -285,12 +285,9 @@ app.use('*', async (c, next) => {
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 
-// CF Access JWT guard on all write/admin endpoints
+// CF Access JWT guard — single middleware rule covers all admin endpoints
 app.use('/gen', requireAccess)
-app.use('/api/store', requireAccess)
-app.use('/api/stats', requireAccess)
-app.use('/api/upload/*', requireAccess)
-app.use('/api/shorten', requireAccess)
+app.use('/api/v1/admin/*', requireAccess)
 
 app.get('/', (c) => c.redirect('/gen', 302))
 
@@ -372,7 +369,7 @@ app.get('/ui/config', async (c) => {
   })
 })
 
-app.post('/api/ui/config', requireAccess, async (c) => {
+app.post('/api/v1/admin/ui/config', async (c) => {
   const body = await c.req.json<{ accent?: string; bg?: string; brand?: string | null; tagline?: string | null }>()
   const hexRe = /^#[0-9a-fA-F]{6}$/
   if ((body.accent && !hexRe.test(body.accent)) || (body.bg && !hexRe.test(body.bg))) {
@@ -394,7 +391,7 @@ app.post('/api/ui/config', requireAccess, async (c) => {
 })
 
 // Turnstile settings — site key (public) + per-feature toggles
-app.post('/api/ui/turnstile', requireAccess, async (c) => {
+app.post('/api/v1/admin/ui/turnstile', async (c) => {
   const body = await c.req.json<{ siteKey?: string | null; creds?: boolean; files?: boolean }>()
   if (body.siteKey !== undefined && body.siteKey !== null && typeof body.siteKey !== 'string') {
     return c.json({ error: 'Invalid siteKey' }, 400)
@@ -417,7 +414,7 @@ app.post('/api/ui/turnstile', requireAccess, async (c) => {
 })
 
 // URL shortener — create link (protected), redirect (public)
-app.post('/api/shorten', async (c) => {
+app.post('/api/v1/admin/links', async (c) => {
   const body = await c.req.json<{ url?: string; ttl?: number; maxClicks?: number }>()
 
   if (!body.url || typeof body.url !== 'string') {
@@ -497,7 +494,7 @@ app.get('/ui/logo', async (c) => {
   return new Response(obj.body, { headers })
 })
 
-app.post('/api/ui/logo', requireAccess, async (c) => {
+app.post('/api/v1/admin/ui/logo', async (c) => {
   const ct = c.req.header('Content-Type') ?? 'image/png'
   const allowed = ['image/png', 'image/svg+xml', 'image/jpeg', 'image/webp']
   if (!allowed.some((t) => ct.startsWith(t))) {
@@ -511,13 +508,13 @@ app.post('/api/ui/logo', requireAccess, async (c) => {
   return c.json({ ok: true })
 })
 
-app.delete('/api/ui/logo', requireAccess, async (c) => {
+app.delete('/api/v1/admin/ui/logo', async (c) => {
   await c.env.BUCKET.delete('ui-logo')
   return c.json({ ok: true })
 })
 
 // Store encrypted secret in KV
-app.post('/api/store', async (c) => {
+app.post('/api/v1/admin/secrets', async (c) => {
   const body = await c.req.json<StoreBody>()
   await c.env.SECRETS_STORE.put(body.id, body.encryptedData, {
     expirationTtl: Math.min(
@@ -530,7 +527,7 @@ app.post('/api/store', async (c) => {
 })
 
 // Retrieve encrypted secret from KV (verifier check + burn-on-read)
-app.post('/api/retrieve/:id', async (c) => {
+app.post('/api/v1/public/secrets/:id/retrieve', async (c) => {
   const id = c.req.param('id')
   const body = await c.req.json<{ verifierCandidate: string; cfTurnstileToken?: string }>()
   const { verifierCandidate } = body
@@ -566,7 +563,7 @@ app.post('/api/retrieve/:id', async (c) => {
 })
 
 // Storage stats + file list
-app.get('/api/stats', async (c) => {
+app.get('/api/v1/admin/stats', async (c) => {
   const s = await c.env.DB.prepare(
     'SELECT SUM(size) as used FROM files WHERE status!="downloaded"'
   ).first<{ used: number }>()
@@ -577,7 +574,7 @@ app.get('/api/stats', async (c) => {
 })
 
 // Initiate multipart upload
-app.post('/api/upload/init', async (c) => {
+app.post('/api/v1/admin/files/init', async (c) => {
   const { filename, size, password, ttl, limit } = await c.req.json<UploadInitBody>()
   const s = await c.env.DB.prepare(
     'SELECT SUM(size) as t FROM files WHERE status!="downloaded"'
@@ -605,7 +602,7 @@ app.post('/api/upload/init', async (c) => {
 })
 
 // Upload a single part of a multipart upload
-app.put('/api/upload/part', async (c) => {
+app.put('/api/v1/admin/files/part', async (c) => {
   const key = c.req.query('key')
   const uploadId = c.req.query('id')
   const num = c.req.query('num')
@@ -620,7 +617,7 @@ app.put('/api/upload/part', async (c) => {
 })
 
 // Finalize multipart upload
-app.post('/api/upload/complete', async (c) => {
+app.post('/api/v1/admin/files/complete', async (c) => {
   const body = await c.req.json<UploadCompleteBody>()
   const mp = c.env.BUCKET.resumeMultipartUpload(body.key, body.uploadId)
   await mp.complete(body.parts)
@@ -631,7 +628,7 @@ app.post('/api/upload/complete', async (c) => {
 })
 
 // Delete file from R2 + D1
-app.delete('/api/del/:id', async (c) => {
+app.delete('/api/v1/public/files/:id', async (c) => {
   const id = c.req.param('id')
   await c.env.BUCKET.delete(id)
   await c.env.DB.prepare('DELETE FROM files WHERE id=?').bind(id).run()
@@ -993,8 +990,8 @@ function saveConfig(){
     var tsFiles=!!(get('cfgTsFiles')||{}).checked;
     var btn=get('cfgSave');if(btn){btn.disabled=true;btn.textContent='...';}
     Promise.all([
-        fetch('/api/ui/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({accent:accent,bg:bg,brand:brand||null,tagline:tagline||null})}),
-        fetch('/api/ui/turnstile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({siteKey:sk||null,creds:tsCreds,files:tsFiles})})
+        fetch('/api/v1/admin/ui/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({accent:accent,bg:bg,brand:brand||null,tagline:tagline||null})}),
+        fetch('/api/v1/admin/ui/turnstile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({siteKey:sk||null,creds:tsCreds,files:tsFiles})})
     ])
         .then(function(){if(btn){btn.textContent=window.L.js_saved;btn.classList.add('saved');setTimeout(function(){btn.textContent=window.L.js_save;btn.classList.remove('saved');btn.disabled=false;},2000);}})
         .catch(function(){if(btn){btn.textContent=window.L.js_error;btn.disabled=false;setTimeout(function(){btn.textContent=window.L.js_save;},2000);}});
@@ -1002,7 +999,7 @@ function saveConfig(){
 function uploadLogo(){
     var input=get('logoInput');if(!input||!input.files.length)return;var file=input.files[0];
     if(file.size>262144){modal(window.L.js_error,window.L.js_logo_max);return;}
-    fetch('/api/ui/logo',{method:'POST',headers:{'Content-Type':file.type},body:file})
+    fetch('/api/v1/admin/ui/logo',{method:'POST',headers:{'Content-Type':file.type},body:file})
         .then(function(r){if(!r.ok)throw r;return r.json();})
         .then(function(){
             var ts='?'+Date.now();
@@ -1013,7 +1010,7 @@ function uploadLogo(){
         .catch(function(){modal(window.L.js_error,window.L.js_logo_fail);});
 }
 function removeLogo(){
-    fetch('/api/ui/logo',{method:'DELETE'})
+    fetch('/api/v1/admin/ui/logo',{method:'DELETE'})
         .then(function(r){if(!r.ok)throw r;return r.json();})
         .then(function(){
             var m=get('brandLogoImg');if(m)m.style.display='none';
@@ -1028,7 +1025,7 @@ async function shorten(){
     if(!url){modal(window.L.js_error,window.L.js_enter_url);return;}
     var btn=get('btnLink');setL(btn,true);
     try{
-        var r=await fetch('/api/shorten',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:url,ttl:parseInt(get('lttl').value),maxClicks:parseInt(get('lclicks').value)})});
+        var r=await fetch('/api/v1/admin/links',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:url,ttl:parseInt(get('lttl').value),maxClicks:parseInt(get('lclicks').value)})});
         var d=await r.json();
         if(!r.ok||d.error){modal(window.L.js_error,d.error||window.L.js_error_occurred);return;}
         get('shortLink').value=d.shortUrl;
@@ -1110,7 +1107,7 @@ async function processStore() {
     try {
         const id = crypto.randomUUID(), key = await derive(p, id, 'k'), iv = crypto.getRandomValues(new Uint8Array(12));
         const enc = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(b)), vf = await derive(p, id, 'v');
-        await fetch('/api/store', { method: 'POST', body: JSON.stringify({ id, verifier: vf, ttl, encryptedData: JSON.stringify({ iv: btoa(String.fromCharCode(...iv)), d: btoa(String.fromCharCode(...new Uint8Array(enc))) }) }) });
+        await fetch('/api/v1/admin/secrets', { method: 'POST', body: JSON.stringify({ id, verifier: vf, ttl, encryptedData: JSON.stringify({ iv: btoa(String.fromCharCode(...iv)), d: btoa(String.fromCharCode(...new Uint8Array(enc))) }) }) });
         get('v-create').classList.add('hidden'); get('v-result').classList.remove('hidden');
         const base = location.origin + '/receive/' + id;
         get('linkS').value = base; get('linkE').value = base + '#' + encodeURIComponent(p);
@@ -1127,7 +1124,7 @@ async function upl() {
     const m = get('fmsg');
     m.innerText = window.L.js_initializing;
     try {
-        const init = await (await fetch('/api/upload/init', { method: 'POST', body: JSON.stringify({ filename: f.name, size: f.size, password: get('fpwd').value, ttl: parseInt(get('fttl').value), limit: parseInt(get('flimit').value) }) })).json();
+        const init = await (await fetch('/api/v1/admin/files/init', { method: 'POST', body: JSON.stringify({ filename: f.name, size: f.size, password: get('fpwd').value, ttl: parseInt(get('fttl').value), limit: parseInt(get('flimit').value) }) })).json();
         if(init.error) throw new Error(init.error);
 
         const tot = Math.ceil(f.size / CHUNK);
@@ -1140,7 +1137,7 @@ async function upl() {
             while (queue.length > 0) {
                 const i = queue.shift();
                 const chunk = f.slice(i * CHUNK, Math.min((i + 1) * CHUNK, f.size));
-                const res = await fetch('/api/upload/part?key=' + init.key + '&id=' + init.uploadId + '&num=' + (i + 1), { method: 'PUT', body: chunk });
+                const res = await fetch('/api/v1/admin/files/part?key=' + init.key + '&id=' + init.uploadId + '&num=' + (i + 1), { method: 'PUT', body: chunk });
                 if(!res.ok) throw new Error('Part failed');
                 const partData = await res.json();
                 parts[i] = partData;
@@ -1153,7 +1150,7 @@ async function upl() {
         for(let t=0; t < CONCURRENCY; t++) threads.push(worker());
         await Promise.all(threads);
 
-        await fetch('/api/upload/complete', { method: 'POST', body: JSON.stringify({ key: init.key, uploadId: init.uploadId, parts: parts, fileId: init.fileId }) });
+        await fetch('/api/v1/admin/files/complete', { method: 'POST', body: JSON.stringify({ key: init.key, uploadId: init.uploadId, parts: parts, fileId: init.fileId }) });
         m.innerText = window.L.js_done;
         get('f-res').classList.remove('hidden');
         const base = location.origin + '/share/' + init.fileId;
@@ -1173,7 +1170,7 @@ async function upl() {
 async function loadS() {
     if (!get('tbl')) return;
     try {
-        const r = await fetch('/api/stats');
+        const r = await fetch('/api/v1/admin/stats');
         const d = await r.json();
         const p = (d.used / d.limit) * 100;
         get('bar').style.width = p + '%';
@@ -1188,7 +1185,7 @@ async function loadS() {
 
 async function del(id) {
     if (confirm(window.L.js_confirm_delete)) {
-        await fetch('/api/del/' + id, { method: 'DELETE' });
+        await fetch('/api/v1/public/files/' + id, { method: 'DELETE' });
         loadS();
     }
 }
@@ -1201,7 +1198,7 @@ async function start(p, bid) {
         const vf = await derive(p, id, 'v');
         const payload = { verifierCandidate: vf };
         if (_tsToken) payload.cfTurnstileToken = _tsToken;
-        const res = await fetch('/api/retrieve/' + id, { method: 'POST', body: JSON.stringify(payload) });
+        const res = await fetch('/api/v1/public/secrets/' + id + '/retrieve', { method: 'POST', body: JSON.stringify(payload) });
         const json = await res.json();
         if (!res.ok) throw new Error(json.error);
         const d = JSON.parse(json.encryptedData);
