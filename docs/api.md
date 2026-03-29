@@ -1,4 +1,4 @@
-# Edge Secrets — API Reference
+# Edge Secrets - API Reference
 
 All API endpoints live under `/api/v1/`. They are split into two zones:
 
@@ -8,14 +8,14 @@ All API endpoints live under `/api/v1/`. They are split into two zones:
 | **Public** | `/api/v1/public/` | No authentication required |
 
 Cloudflare Access requires only **two rules** to protect the entire application:
-- `/gen` — the creation panel
-- `/api/v1/admin/*` — all write/admin API operations
+- `/gen` - the creation panel
+- `/api/v1/admin/*` - all write/admin API operations
 
 > Public UI routes (`/receive/:id`, `/share/:id`, `/s/:id`, `/ui/config`, `/ui/logo`, `/ui/qr`) and public API routes (`/api/v1/public/*`) must remain outside the Access policy.
 
 ---
 
-## Admin Zone — `/api/v1/admin/`
+## Admin Zone - `/api/v1/admin/`
 
 All requests in this zone must carry a valid Cloudflare Access JWT in either:
 - `Cf-Access-Jwt-Assertion` header, or
@@ -43,7 +43,7 @@ Store an encrypted secret in KV.
 
 #### Programmatic usage (Node.js / Web Crypto)
 
-The server stores only ciphertext — **all encryption must happen client-side** before calling this endpoint. The passphrase never leaves the caller; it is embedded in the share URL fragment (`#passphrase`) which browsers never send to the server.
+The server stores only ciphertext - **all encryption must happen client-side** before calling this endpoint. The passphrase never leaves the caller; it is embedded in the share URL fragment (`#passphrase`) which browsers never send to the server.
 
 ```js
 const BASE_URL = 'https://secret.example.com'
@@ -53,7 +53,7 @@ async function pushSecret(plaintext, passphrase, ttlSeconds = 86400) {
   const enc  = new TextEncoder()
   const id   = crypto.randomUUID()
 
-  // Derive encryption key — PBKDF2 / SHA-256 / 100k iterations
+  // Derive encryption key - PBKDF2 / SHA-256 / 100k iterations
   const base = await crypto.subtle.importKey('raw', enc.encode(passphrase), 'PBKDF2', false, ['deriveKey'])
   const key  = await crypto.subtle.deriveKey(
     { name: 'PBKDF2', salt: enc.encode(id + '_k'), iterations: 100_000, hash: 'SHA-256' },
@@ -68,7 +68,7 @@ async function pushSecret(plaintext, passphrase, ttlSeconds = 86400) {
     d:  btoa(String.fromCharCode(...new Uint8Array(ciphertext))),
   })
 
-  // Derive verifier — separate PBKDF2 / 50k iterations / salt = id + "_v"
+  // Derive verifier - separate PBKDF2 / 50k iterations / salt = id + "_v"
   const vBase    = await crypto.subtle.importKey('raw', enc.encode(passphrase), 'PBKDF2', false, ['deriveBits'])
   const vBits    = await crypto.subtle.deriveBits(
     { name: 'PBKDF2', salt: enc.encode(id + '_v'), iterations: 50_000, hash: 'SHA-256' },
@@ -83,7 +83,7 @@ async function pushSecret(plaintext, passphrase, ttlSeconds = 86400) {
     body:    JSON.stringify({ id, encryptedData, verifier, ttl: ttlSeconds }),
   })
 
-  // Share link — passphrase in fragment, never sent to server
+  // Share link - passphrase in fragment, never sent to server
   return `${BASE_URL}/receive/${id}#${passphrase}`
 }
 ```
@@ -113,7 +113,7 @@ Initiate a multipart upload. Returns the R2 `uploadId` and `key`.
 { "key": "uuid", "uploadId": "r2-upload-id", "fileId": "uuid" }
 ```
 
-**Response `507`** — storage limit exceeded:
+**Response `507`** - storage limit exceeded:
 ```json
 { "error": "STORAGE_LIMIT" }
 ```
@@ -282,7 +282,7 @@ Remove the brand logo from R2.
 
 ---
 
-## Public Zone — `/api/v1/public/`
+## Public Zone - `/api/v1/public/`
 
 No authentication required. Turnstile may apply depending on KV settings.
 
@@ -291,7 +291,7 @@ No authentication required. Turnstile may apply depending on KV settings.
 #### `POST /api/v1/public/secrets/:id/retrieve`
 Retrieve and burn an encrypted secret. Verifier is checked before returning ciphertext.
 
-**Path parameter:** `id` — secret ID
+**Path parameter:** `id` - secret ID
 
 **Request body (JSON):**
 ```json
@@ -306,22 +306,22 @@ Retrieve and burn an encrypted secret. Verifier is checked before returning ciph
 { "encryptedData": "base64-json-blob" }
 ```
 
-**Response `403`** — wrong verifier (attempts remaining):
+**Response `403`** - wrong verifier (attempts remaining):
 ```json
 { "error": "RETRY_2" }
 ```
 
-**Response `403`** — Turnstile challenge failed:
+**Response `403`** - Turnstile challenge failed:
 ```json
 { "error": "CHALLENGE_FAILED" }
 ```
 
-**Response `410`** — max attempts exceeded, secret deleted:
+**Response `410`** - max attempts exceeded, secret deleted:
 ```json
 { "error": "TERMINATED" }
 ```
 
-**Response `404`** — secret not found or expired:
+**Response `404`** - secret not found or expired:
 ```json
 { "error": "Link wygasł, lub klucz jest nieprawidłowy" }
 ```
@@ -331,9 +331,9 @@ Retrieve and burn an encrypted secret. Verifier is checked before returning ciph
 ### Files
 
 #### `DELETE /api/v1/public/files/:id`
-Delete a file from R2 and D1. Intentionally outside CF Access — used by the uploader immediately after generating a link if they choose to revoke it.
+Delete a file from R2 and D1. Intentionally outside CF Access - used by the uploader immediately after generating a link if they choose to revoke it.
 
-**Path parameter:** `id` — file ID (UUID)
+**Path parameter:** `id` - file ID (UUID)
 
 **Response `200`:**
 ```json
