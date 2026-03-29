@@ -24,7 +24,7 @@ Secure, one-time sharing of passwords, files and links - built on Cloudflare Wor
 
 Running a secrets tool on Cloudflare Workers is not just a cost decision - it changes what the tool can actually do.
 
-**Globally fast, always.** Workers run in 300+ locations worldwide. Whether your recipient is in Warsaw, Singapore, or São Paulo, the secret is served from the nearest edge node - no single-region latency, no cold starts, no load balancers to manage.
+**Globally fast, always.** Workers run in 300+ locations worldwide. Whether your recipient is in Warsaw, Singapore, or San Escobar, the secret is served from the nearest edge node - no single-region latency, no cold starts, no load balancers to manage.
 
 **No servers, no attack surface.** There is no VM to patch, no open SSH port, no container to harden. The entire runtime is ephemeral and managed by Cloudflare. Your only security responsibility is the application code itself.
 
