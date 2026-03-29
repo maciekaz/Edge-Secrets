@@ -41,6 +41,55 @@ Store an encrypted secret in KV.
 { "success": true }
 ```
 
+#### Programmatic usage (Node.js / Web Crypto)
+
+The server stores only ciphertext — **all encryption must happen client-side** before calling this endpoint. The passphrase never leaves the caller; it is embedded in the share URL fragment (`#passphrase`) which browsers never send to the server.
+
+```js
+const BASE_URL = 'https://secret.example.com'
+const JWT     = 'eyJ...'   // Cf-Access-Jwt-Assertion from your CF Access service token
+
+async function pushSecret(plaintext, passphrase, ttlSeconds = 86400) {
+  const enc  = new TextEncoder()
+  const id   = crypto.randomUUID()
+
+  // Derive encryption key — PBKDF2 / SHA-256 / 100k iterations
+  const base = await crypto.subtle.importKey('raw', enc.encode(passphrase), 'PBKDF2', false, ['deriveKey'])
+  const key  = await crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt: enc.encode(id + '_k'), iterations: 100_000, hash: 'SHA-256' },
+    base, { name: 'AES-GCM', length: 256 }, false, ['encrypt']
+  )
+
+  // Encrypt
+  const iv         = crypto.getRandomValues(new Uint8Array(12))
+  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, enc.encode(plaintext))
+  const encryptedData = JSON.stringify({
+    iv: btoa(String.fromCharCode(...iv)),
+    d:  btoa(String.fromCharCode(...new Uint8Array(ciphertext))),
+  })
+
+  // Derive verifier — separate PBKDF2 / 50k iterations / salt = id + "_v"
+  const vBase    = await crypto.subtle.importKey('raw', enc.encode(passphrase), 'PBKDF2', false, ['deriveBits'])
+  const vBits    = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt: enc.encode(id + '_v'), iterations: 50_000, hash: 'SHA-256' },
+    vBase, 256
+  )
+  const verifier = btoa(String.fromCharCode(...new Uint8Array(vBits)))
+
+  // Store
+  await fetch(`${BASE_URL}/api/v1/admin/secrets`, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': JWT },
+    body:    JSON.stringify({ id, encryptedData, verifier, ttl: ttlSeconds }),
+  })
+
+  // Share link — passphrase in fragment, never sent to server
+  return `${BASE_URL}/receive/${id}#${passphrase}`
+}
+```
+
+To retrieve programmatically (e.g. in automation), derive the same verifier from the passphrase and call `POST /api/v1/public/secrets/:id/retrieve`, then decrypt locally with the same key derivation in reverse.
+
 ---
 
 ### Files (Multipart Upload)
