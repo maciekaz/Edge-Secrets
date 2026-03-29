@@ -1,7 +1,7 @@
 # Edge Secrets
 
 Secure, one-time sharing of passwords, files and links - built on Cloudflare Workers.
-
+<img width="1280" height="684" alt="image" src="https://github.com/user-attachments/assets/a39e4cf2-01ba-4a8c-9f36-42dada1c6c9f" />
 ## Features
 
 | Feature | Details |
