@@ -14,6 +14,7 @@ Secure, one-time sharing of passwords, files and links — built on Cloudflare W
 | **QR codes** | Server-rendered SVG QR on every output link — scan directly from desktop |
 | **CF Access** | All write/admin endpoints protected by Cloudflare Access + RS256 JWT verification |
 | **Internationalisation** | 8 languages, auto-detected per user, flag picker in the UI |
+| **REST API** | Versioned `/api/v1/` — admin zone (`/api/v1/admin/*`) protected by CF Access, public zone (`/api/v1/public/*`) open; full docs in [docs/api.md](docs/api.md) |
 
 ---
 
