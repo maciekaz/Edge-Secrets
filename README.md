@@ -51,7 +51,7 @@ Changing the language via the picker only affects the requesting user's browser 
 
 A small flag button appears in the top-left corner of every page (next to the dark/light mode toggle). Clicking it opens a dropdown with all supported languages. Selecting one sets the `lang` cookie and reloads the page.
 
-### Adding a new language
+### How to add your own language
 
 1. Open `src/i18n.ts`.
 2. Add the new code to the `LangCode` union type:
@@ -64,7 +64,6 @@ A small flag button appears in the top-left corner of every page (next to the da
    { code: 'xx', flag: '🇽🇽', name: 'Language name' }
    ```
 5. Deploy - no other files need to change.
-
 ---
 
 ## How It Works
