@@ -1,0 +1,27 @@
+name = "edge-secrets"
+account_id = "<YOUR_CLOUDFLARE_ACCOUNT_ID>"
+main = "src/index.ts"
+compatibility_date = "2024-10-22"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = false
+preview_urls = false
+
+routes = [
+  { pattern = "your.domain.com", custom_domain = true, zone_name = "domain.com" }
+]
+
+[[kv_namespaces]]
+binding = "SECRETS_STORE"
+id = "<KV_NAMESPACE_ID>"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "secret-db"
+database_id = "<D1_DATABASE_ID>"
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "secret-files"
+
+[triggers]
+crons = ["0 * * * *"]
