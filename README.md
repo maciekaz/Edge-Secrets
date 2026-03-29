@@ -1,26 +1,26 @@
 # Edge Secrets
 
-Secure, one-time sharing of passwords, files and links — built on Cloudflare Workers.
+Secure, one-time sharing of passwords, files and links - built on Cloudflare Workers.
 
 ## Features
 
 | Feature | Details |
 |---|---|
-| **Text secrets** | Zero-knowledge credential sharing — AES-256-GCM, passphrase in URL hash, burn-on-read |
+| **Text secrets** | Zero-knowledge credential sharing - AES-256-GCM, passphrase in URL hash, burn-on-read |
 | **File sharing** | Up to 5 GB via R2, optional password, download limit, server-enforced TTL |
 | **URL shortener** | Short links with TTL and click limit, SSRF-safe |
-| **Appearance editor** | Accent colour, background colour, brand name, tagline, logo — all globally persistent |
+| **Appearance editor** | Accent colour, background colour, brand name, tagline, logo - all globally persistent |
 | **Dark / light mode** | System-detected per client, manually overridable |
-| **QR codes** | Server-rendered SVG QR on every output link — scan directly from desktop |
+| **QR codes** | Server-rendered SVG QR on every output link - scan directly from desktop |
 | **CF Access** | All write/admin endpoints protected by Cloudflare Access + RS256 JWT verification |
 | **Internationalisation** | 8 languages, auto-detected per user, flag picker in the UI |
-| **REST API** | Versioned `/api/v1/` — admin zone (`/api/v1/admin/*`) protected by CF Access, public zone (`/api/v1/public/*`) open; full docs in [docs/api.md](docs/api.md) |
+| **REST API** | Versioned `/api/v1/` - admin zone (`/api/v1/admin/*`) protected by CF Access, public zone (`/api/v1/public/*`) open; full docs in [docs/api.md](docs/api.md) |
 
 ---
 
 ## Internationalisation (i18n)
 
-All UI text is managed in `src/i18n.ts` — a self-contained module with no external dependencies.
+All UI text is managed in `src/i18n.ts` - a self-contained module with no external dependencies.
 
 ### Supported languages
 
@@ -35,15 +35,15 @@ All UI text is managed in `src/i18n.ts` — a self-contained module with no exte
 | `pt` | Português |
 | `zh` | 中文 (Simplified) |
 
-### Language resolution — per user, not global
+### Language resolution - per user, not global
 
 Each user's language is resolved independently on every request. Priority order:
 
-1. **Cookie `lang`** — set when the user picks a language via the flag picker (stored for 1 year, `SameSite=Lax`). This is the highest priority and persists across sessions.
-2. **`Accept-Language` header** — automatic browser locale, parsed and matched against supported codes.
-3. **Default: English** — used when neither source yields a supported code.
+1. **Cookie `lang`** - set when the user picks a language via the flag picker (stored for 1 year, `SameSite=Lax`). This is the highest priority and persists across sessions.
+2. **`Accept-Language` header** - automatic browser locale, parsed and matched against supported codes.
+3. **Default: English** - used when neither source yields a supported code.
 
-Changing the language via the picker only affects the requesting user's browser — it has no effect on other users.
+Changing the language via the picker only affects the requesting user's browser - it has no effect on other users.
 
 ### Flag picker
 
@@ -61,7 +61,7 @@ A small flag button appears in the top-left corner of every page (next to the da
    ```ts
    { code: 'xx', flag: '🇽🇽', name: 'Language name' }
    ```
-5. Deploy — no other files need to change.
+5. Deploy - no other files need to change.
 
 ---
 
@@ -81,7 +81,7 @@ sequenceDiagram
     S->>Server: store ciphertext + verifier hash
     S-->>R: /receive/{id}#passphrase
 
-    Note over Server,R: passphrase is in the URL hash — browsers never send it to the server
+    Note over Server,R: passphrase is in the URL hash - browsers never send it to the server
 
     R->>Server: retrieve (verifier hash only)
     Server->>Server: verify → delete (burn on read)
@@ -106,7 +106,7 @@ sequenceDiagram
 
 ### Files
 
-Files are **not client-side encrypted** — they go directly to R2. Protection is enforced through:
+Files are **not client-side encrypted** - they go directly to R2. Protection is enforced through:
 
 ```mermaid
 flowchart LR
@@ -121,9 +121,9 @@ flowchart LR
     W -.->|burn when limit reached| R2
 ```
 
-- Optional password (`SHA-256(password + PEPPER)` — verified server-side)
+- Optional password (`SHA-256(password + PEPPER)` - verified server-side)
 - Download limit (1×, 5×, or unlimited)
-- Server-enforced TTL — maximum 7 days regardless of what the client sends
+- Server-enforced TTL - maximum 7 days regardless of what the client sends
 - Automatic deletion on expiry (hourly cron)
 - Lockout after 3 failed password attempts → file deleted immediately
 
@@ -153,9 +153,9 @@ The Worker refuses to start if `PEPPER` is not set (`bindings guard`).
 | **CF Access + JWT verification** | Protected endpoints guarded at two layers: Cloudflare Access policy + in-Worker RS256 JWT verification against JWKS endpoint (cached 1 h) |
 | **Security headers** | CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy |
 | **RFC 5987 filenames** | Safe percent-encoded `Content-Disposition` filenames (no header injection) |
-| **No content logging** | Errors return generic messages — no `e.message` leakage |
+| **No content logging** | Errors return generic messages - no `e.message` leakage |
 | **Bindings guard** | Worker returns 500 on startup if any required binding is missing (DB, BUCKET, KV, PEPPER, CF_TEAM_DOMAIN, CF_AUD) |
-| **Turnstile** | Optional Cloudflare Turnstile (managed challenge) on secret retrieval and file downloads — blocks bots and brute-force before any KV/D1/R2 access; token bound to visitor IP via `remoteip`; failed challenge never increments the attempt counter. See [docs/turnstile.md](docs/turnstile.md). |
+| **Turnstile** | Optional Cloudflare Turnstile (managed challenge) on secret retrieval and file downloads - blocks bots and brute-force before any KV/D1/R2 access; token bound to visitor IP via `remoteip`; failed challenge never increments the attempt counter. See [docs/turnstile.md](docs/turnstile.md). |
 
 ---
 
@@ -187,7 +187,7 @@ flowchart TD
 - **Framework:** [Hono](https://hono.dev) v4
 - **Language:** TypeScript (strict)
 - **Deploy tool:** Wrangler v4
-- **QR codes:** [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) — server-side SVG rendering
+- **QR codes:** [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) - server-side SVG rendering
 
 ---
 
@@ -195,7 +195,7 @@ flowchart TD
 
 API endpoints are grouped under `/api/v1/` in two zones. Cloudflare Access needs only **two rules**: `/gen` and `/api/v1/admin/*`.
 
-### Admin Zone — `/api/v1/admin/` (🔒 CF Access)
+### Admin Zone - `/api/v1/admin/` (🔒 CF Access)
 
 | Method | Path | Description |
 |---|---|---|
@@ -211,7 +211,7 @@ API endpoints are grouped under `/api/v1/` in two zones. Cloudflare Access needs
 | `POST` | `/api/v1/admin/ui/logo` | Upload logo (PNG/SVG/WebP, max 256 KB) |
 | `DELETE` | `/api/v1/admin/ui/logo` | Remove logo |
 
-### Public Zone — `/api/v1/public/` (No auth)
+### Public Zone - `/api/v1/public/` (No auth)
 
 | Method | Path | Description |
 |---|---|---|
@@ -231,7 +231,7 @@ API endpoints are grouped under `/api/v1/` in two zones. Cloudflare Access needs
 
 > Full request/response documentation: [docs/api.md](docs/api.md)
 >
-> `/api/v1/public/files/:id` (DELETE) is intentionally outside CF Access — used by the uploader to self-revoke a link.
+> `/api/v1/public/files/:id` (DELETE) is intentionally outside CF Access - used by the uploader to self-revoke a link.
 > `/ui/config` and `/ui/logo` (GET) are outside `/api/v1/` so CF Access policies don't block public clients.
 
 ---
@@ -254,7 +254,7 @@ Copy the example config and fill in your values:
 cp wrangler.example.toml wrangler.toml
 ```
 
-`wrangler.toml` is git-ignored — your account ID and resource IDs stay local.
+`wrangler.toml` is git-ignored - your account ID and resource IDs stay local.
 
 #### Create Cloudflare resources
 
@@ -305,7 +305,7 @@ npx wrangler secret put CF_TEAM_DOMAIN
 npx wrangler secret put CF_AUD
 ```
 
-> Make sure you have a CF Zero Trust **Access Policy** configured for only **two paths**: `/gen` and `/api/v1/admin/*`. Do **not** include `/ui/config`, `/ui/logo`, `/ui/qr`, `/s/`, or `/api/v1/public/*` — these must remain public.
+> Make sure you have a CF Zero Trust **Access Policy** configured for only **two paths**: `/gen` and `/api/v1/admin/*`. Do **not** include `/ui/config`, `/ui/logo`, `/ui/qr`, `/s/`, or `/api/v1/public/*` - these must remain public.
 
 ### 4. Deploy
 
@@ -325,7 +325,7 @@ CF_TEAM_DOMAIN=yourteam.cloudflareaccess.com
 CF_AUD=your-aud-tag
 ```
 
-> In local dev, requests don't go through CF Access — protected endpoints require a JWT passed manually via the `Cf-Access-Jwt-Assertion` header.
+> In local dev, requests don't go through CF Access - protected endpoints require a JWT passed manually via the `Cf-Access-Jwt-Assertion` header.
 
 ```bash
 npx wrangler dev
