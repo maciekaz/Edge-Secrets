@@ -1234,6 +1234,13 @@ function onTurnstileSuccess(token) {
     if (btnM) btnM.disabled = false;
   }
 }
+function onTsFile(token) {
+  var btn = get('btnDl');
+  if (btn) btn.disabled = false;
+  var form = get('dlForm');
+  var hasPwd = form && form.querySelector('input[name="pwd"]');
+  if (form && !hasPwd) form.submit();
+}
 
 const unlockM = () => start(get('recvP').value, 'btnM');
 const unlockA = () => start(decodeURIComponent(location.hash.substring(1)), 'btnA');
@@ -1250,8 +1257,8 @@ ${LANG_PICKER_JS}
 </script>
 `
 
-const BASE_HTML = (body: string, langCode: LangCode = 'en', langPickerHtml: string = ''): string =>
-  `<!DOCTYPE html><html lang="${langCode}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Edge Secrets</title><style>${CSS}</style></head><body><button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" title="Toggle theme">\u2600</button>${langPickerHtml}${body}<div class="overlay" id="qrOv" onclick="if(event.target===this)this.style.display='none'" style="display:none"><div class="modal" style="max-width:280px;padding:28px"><h3 style="margin-bottom:18px" id="qrTitle"></h3><img id="qrImg" class="qr-modal-img" alt="QR Code" src=""><p id="qrTxt" style="font-size:0.6rem;word-break:break-all;color:var(--text-muted);margin-bottom:18px;text-align:center;line-height:1.5"></p><button class="modal-btn" onclick="get('qrOv').style.display='none'" id="qrCloseBtn"></button></div></div>${CLIENT_JS}</body></html>`
+const BASE_HTML = (body: string, langCode: LangCode = 'en', langPickerHtml: string = '', tailScript: string = ''): string =>
+  `<!DOCTYPE html><html lang="${langCode}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Edge Secrets</title><style>${CSS}</style></head><body><button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" title="Toggle theme">\u2600</button>${langPickerHtml}${body}<div class="overlay" id="qrOv" onclick="if(event.target===this)this.style.display='none'" style="display:none"><div class="modal" style="max-width:280px;padding:28px"><h3 style="margin-bottom:18px" id="qrTitle"></h3><img id="qrImg" class="qr-modal-img" alt="QR Code" src=""><p id="qrTxt" style="font-size:0.6rem;word-break:break-all;color:var(--text-muted);margin-bottom:18px;text-align:center;line-height:1.5"></p><button class="modal-btn" onclick="get('qrOv').style.display='none'" id="qrCloseBtn"></button></div></div>${CLIENT_JS}${tailScript}</body></html>`
 
 function renderGen(type: string, t: Translations, langCode: LangCode): string {
   const isLink = type === 'link'
@@ -1428,7 +1435,6 @@ function renderReceiveCred(_id: string, lang: Lang, langCode: LangCode, turnstil
     ? `<script src="https://challenges.cloudflare.com/turnstile/v1/api.js" async defer></script>`
     : ''
   const body = `
-  ${tsScript}
   <script>window.L = ${JSON.stringify(lang)};</script>
   <div class="card">
     <div class="brand-header"><span class="brand-logo">EDGE SECRETS</span></div>
@@ -1453,7 +1459,7 @@ function renderReceiveCred(_id: string, lang: Lang, langCode: LangCode, turnstil
       <button class="btn" style="margin-top:20px;" onclick="copyBtn(this, get('content').innerText)"><span>${lang.btn_copy}</span></button>
     </div>
   </div><div id="ov" class="overlay"><div class="modal"><h3 id="mT"></h3><p id="mMsg"></p><button class="modal-btn" onclick="get('ov').style.display='none'">OK</button></div></div>`
-  return BASE_HTML(body, langCode, lp)
+  return BASE_HTML(body, langCode, lp, tsScript)
 }
 
 function renderReceiveFile(filename: string, lang: Lang, langCode: LangCode): string {
@@ -1492,8 +1498,9 @@ function renderFileTurnstileGate(
   const passwordField = hasPassword
     ? `<input type="password" name="pwd" id="p" placeholder="${lang.placeholder_key}" style="margin-top:14px">`
     : ''
+  const tailScript = `
+  <script src="https://challenges.cloudflare.com/turnstile/v1/api.js" defer></script>`
   const body = `
-  <script src="https://challenges.cloudflare.com/turnstile/v1/api.js" async defer></script>
   <script>window.L = ${JSON.stringify(lang)};</script>
   <div class="card">
       <div class="brand-header"><span class="brand-logo" id="brandName">EDGE SECRETS</span><p class="brand-tagline" id="brandTagline" style="display:none"></p></div>
@@ -1511,13 +1518,6 @@ function renderFileTurnstileGate(
           ${passwordField}
           <button class="btn" id="btnDl" style="margin-top:14px" ${hasPassword ? 'disabled' : ''}><span>${lang.btn_unlock}</span></button>
       </form>
-  </div><div id="ov" class="overlay"><div class="modal"><h3 id="mT"></h3><p id="mMsg"></p><button class="modal-btn" onclick="get('ov').style.display='none'">OK</button></div></div>
-  <script>
-  function onTsFile() {
-    var btn = document.getElementById('btnDl');
-    if (btn) btn.disabled = false;
-    if (!${hasPassword}) document.getElementById('dlForm').submit();
-  }
-  </script>`
-  return BASE_HTML(body, langCode, lp)
+  </div><div id="ov" class="overlay"><div class="modal"><h3 id="mT"></h3><p id="mMsg"></p><button class="modal-btn" onclick="get('ov').style.display='none'">OK</button></div></div>`
+  return BASE_HTML(body, langCode, lp, tailScript)
 }
