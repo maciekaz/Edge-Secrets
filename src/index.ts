@@ -2,6 +2,7 @@ import { Hono, type Context, type MiddlewareHandler } from 'hono'
 import { cors } from 'hono/cors'
 import { getCookie } from 'hono/cookie'
 import qrcode from 'qrcode-generator'
+import { getLang, renderLangPicker, LANG_PICKER_CSS, LANG_PICKER_JS, type Translations, type LangCode } from './i18n'
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -11,45 +12,6 @@ const CONFIG = {
   maxAttempts: 3,
   maxStorage: 9 * 1024 * 1024 * 1024,
   visualTtl: 300,
-} as const
-
-// ── i18n ──────────────────────────────────────────────────────────────────────
-
-const I18N = {
-  pl: {
-    title_cred: 'Odbierz wiadomość',
-    title_file: 'Pobieranie Pliku',
-    label_key: 'WPROWADŹ KLUCZ DESZYFRUJĄCY',
-    placeholder_key: 'Klucz dostępu...',
-    btn_decrypt: 'ODSZYFRUJ',
-    ready_msg: 'DANE GOTOWE DO ODCZYTU',
-    btn_open: 'OTWÓRZ WIADOMOŚĆ',
-    label_decrypted: 'DANE ODSZYFROWANE:',
-    btn_copy: 'KOPIUJ TREŚĆ',
-    file_protected: 'PLIK ZABEZPIECZONY HASŁEM',
-    btn_unlock: 'ODBLOKUJ I POBIERZ',
-    js_copied: 'Skopiowano!',
-    js_manual: 'Skopiuj ręcznie: ',
-    js_nopass: 'Brak hasła',
-    js_timer: 'ZAPOMINANIE ZA: ',
-  },
-  en: {
-    title_cred: 'Secure Data Retrieval',
-    title_file: 'Secure File Download',
-    label_key: 'ENTER DECRYPTION KEY',
-    placeholder_key: 'Access key...',
-    btn_decrypt: 'DECRYPT',
-    ready_msg: 'DATA READY TO READ',
-    btn_open: 'OPEN MESSAGE',
-    label_decrypted: 'DECRYPTED DATA:',
-    btn_copy: 'COPY CONTENT',
-    file_protected: 'PASSWORD PROTECTED FILE',
-    btn_unlock: 'UNLOCK & DOWNLOAD',
-    js_copied: 'Copied!',
-    js_manual: 'Copy manually: ',
-    js_nopass: 'Password required',
-    js_timer: 'AUTO-DELETE IN: ',
-  },
 } as const
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -63,7 +25,7 @@ type Bindings = {
   CF_AUD: string
 }
 
-type Lang = (typeof I18N)['pl'] | (typeof I18N)['en']
+type Lang = Translations
 
 interface FileRecord {
   id: string
@@ -124,11 +86,6 @@ const HTML_SECURITY_HEADERS: Record<string, string> = {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-function getLang(req: Request): Lang {
-  const header = req.headers.get('Accept-Language') ?? ''
-  return header.toLowerCase().includes('pl') ? I18N.pl : I18N.en
-}
 
 function escapeHtml(unsafe: unknown): unknown {
   if (typeof unsafe !== 'string') return unsafe
@@ -319,17 +276,19 @@ app.use('/api/shorten', requireAccess)
 
 app.get('/', (c) => c.redirect('/gen', 302))
 
-app.get('/gen', (c) =>
-  c.html(renderGen(c.req.query('t') ?? 'cred'), 200, HTML_SECURITY_HEADERS)
-)
+app.get('/gen', (c) => {
+  const { t, code } = getLang(c.req.raw)
+  return c.html(renderGen(c.req.query('t') ?? 'cred', t, code), 200, HTML_SECURITY_HEADERS)
+})
 
-app.get('/receive/:id', (c) =>
-  c.html(
-    renderReceiveCred(c.req.param('id'), getLang(c.req.raw)),
+app.get('/receive/:id', (c) => {
+  const { t, code } = getLang(c.req.raw)
+  return c.html(
+    renderReceiveCred(c.req.param('id'), t, code),
     200,
     HTML_SECURITY_HEADERS
   )
-)
+})
 
 app.get('/share/:id', (c) => handleFileDownload(c))
 
@@ -629,7 +588,7 @@ async function handleFileDownload(c: Context<{ Bindings: Bindings }>): Promise<R
   const id = c.req.param('id')
   if (!id) return c.text('BAD_REQUEST', 400)
   const env = c.env
-  const lang = getLang(c.req.raw)
+  const { t: lang, code: langCode } = getLang(c.req.raw)
 
   const f = await env.DB.prepare('SELECT * FROM files WHERE id=?')
     .bind(id)
@@ -642,7 +601,7 @@ async function handleFileDownload(c: Context<{ Bindings: Bindings }>): Promise<R
   if (f.password_hash) {
     const pwdParam = c.req.query('pwd')
     if (!pwdParam) {
-      return c.html(renderReceiveFile(f.filename, lang), 200, HTML_SECURITY_HEADERS)
+      return c.html(renderReceiveFile(f.filename, lang, langCode), 200, HTML_SECURITY_HEADERS)
     }
     if ((await hashPwd(pwdParam, env.PEPPER)) !== f.password_hash) {
       const att = (f.failed_attempts ?? 0) + 1
@@ -819,7 +778,7 @@ footer{margin-top:28px;color:var(--text-dim);font-size:0.7rem;text-align:center;
 [data-theme="light"]{--bg:#eeeef5;--surface:#f8f8fc;--surface-2:#e4e4ee;--surface-3:#d8d8e8;--text:#14141e;--text-muted:rgba(20,20,30,0.45);--text-dim:rgba(20,20,30,0.22);--border:rgba(0,0,0,0.08);--border-strong:rgba(0,0,0,0.14)}
 .theme-toggle{position:fixed;top:18px;left:18px;z-index:10;width:32px;height:32px;display:flex;align-items:center;justify-content:center;cursor:pointer;border:1px solid var(--border);background:var(--surface);color:var(--text-muted);font-size:14px;transition:color 0.2s,border-color 0.2s}
 .theme-toggle:hover{color:var(--accent);border-color:var(--accent)}
-`
+${LANG_PICKER_CSS}`
 
 const CLIENT_JS = `
 <script>
@@ -875,21 +834,21 @@ function saveConfig(){
     var btn=get('cfgSave');if(btn){btn.disabled=true;btn.textContent='...';}
     fetch('/api/ui/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({accent:accent,bg:bg,brand:brand||null,tagline:tagline||null})})
         .then(function(r){return r.json();})
-        .then(function(){if(btn){btn.textContent='ZAPISANO ✓';btn.classList.add('saved');setTimeout(function(){btn.textContent='ZAPISZ';btn.classList.remove('saved');btn.disabled=false;},2000);}})
-        .catch(function(){if(btn){btn.textContent='BŁĄD';btn.disabled=false;setTimeout(function(){btn.textContent='ZAPISZ';},2000);}});
+        .then(function(){if(btn){btn.textContent=window.L.js_saved;btn.classList.add('saved');setTimeout(function(){btn.textContent=window.L.js_save;btn.classList.remove('saved');btn.disabled=false;},2000);}})
+        .catch(function(){if(btn){btn.textContent=window.L.js_error;btn.disabled=false;setTimeout(function(){btn.textContent=window.L.js_save;},2000);}});
 }
 function uploadLogo(){
     var input=get('logoInput');if(!input||!input.files.length)return;var file=input.files[0];
-    if(file.size>262144){modal('Błąd','Logo max 256 KB');return;}
+    if(file.size>262144){modal(window.L.js_error,window.L.js_logo_max);return;}
     fetch('/api/ui/logo',{method:'POST',headers:{'Content-Type':file.type},body:file})
         .then(function(r){if(!r.ok)throw r;return r.json();})
         .then(function(){
             var ts='?'+Date.now();
             var m=get('brandLogoImg');if(m){m.src='/ui/logo'+ts;m.style.display='block';}
             var pv=get('logoPreview');if(pv){pv.src='/ui/logo'+ts;pv.style.display='block';}
-            var st=get('logoStatus');if(st)st.textContent='Logo aktywne';
+            var st=get('logoStatus');if(st)st.textContent=window.L.js_logo_active;
         })
-        .catch(function(){modal('Błąd','Nie udało się wgrać logo');});
+        .catch(function(){modal(window.L.js_error,window.L.js_logo_fail);});
 }
 function removeLogo(){
     fetch('/api/ui/logo',{method:'DELETE'})
@@ -897,22 +856,22 @@ function removeLogo(){
         .then(function(){
             var m=get('brandLogoImg');if(m)m.style.display='none';
             var pv=get('logoPreview');if(pv)pv.style.display='none';
-            var st=get('logoStatus');if(st)st.textContent='Brak logo';
+            var st=get('logoStatus');if(st)st.textContent=window.L.js_no_logo;
         })
         .catch(function(){});
 }
 async function shorten(){
     var urlEl=get('lurl');if(!urlEl)return;
     var url=urlEl.value.trim();
-    if(!url){modal('Błąd','Wprowadź URL');return;}
+    if(!url){modal(window.L.js_error,window.L.js_enter_url);return;}
     var btn=get('btnLink');setL(btn,true);
     try{
         var r=await fetch('/api/shorten',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:url,ttl:parseInt(get('lttl').value),maxClicks:parseInt(get('lclicks').value)})});
         var d=await r.json();
-        if(!r.ok||d.error){modal('Błąd',d.error||'Wystąpił błąd');return;}
+        if(!r.ok||d.error){modal(window.L.js_error,d.error||window.L.js_error_occurred);return;}
         get('shortLink').value=d.shortUrl;
         get('link-res').classList.remove('hidden');
-    }catch(e){modal('Błąd','Nie udało się skrócić linku');}
+    }catch(e){modal(window.L.js_error,window.L.js_shorten_fail);}
     finally{setL(btn,false);}
 }
 (function(){
@@ -930,7 +889,7 @@ async function shorten(){
     if(bh){
         var li=document.createElement('img');li.id='brandLogoImg';li.className='brand-logo-img';
         li.src='/ui/logo';li.style.display='none';
-        li.onload=function(){this.style.display='block';var st=get('logoStatus');if(st)st.textContent='Logo aktywne';};
+        li.onload=function(){this.style.display='block';var st=get('logoStatus');if(st)st.textContent=window.L.js_logo_active;};
         li.onerror=function(){this.style.display='none';};
         bh.insertBefore(li,bh.firstChild);
     }
@@ -939,6 +898,8 @@ async function shorten(){
 function showQR(url){
     get('qrImg').src='/ui/qr?d='+encodeURIComponent(url);
     get('qrTxt').textContent=url;
+    var qt=get('qrTitle');if(qt)qt.textContent=window.L.qr_title;
+    var qc=get('qrCloseBtn');if(qc)qc.textContent=window.L.qr_close;
     get('qrOv').style.display='flex';
 }
 function escapeHtml(u) { return u.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;"); }
@@ -979,7 +940,7 @@ const genK = () => { const c = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ2
 
 async function processStore() {
     const b = get('body').value, p = get('pass').value, ttl = get('ttl').value;
-    if (!b || !p) return modal('BŁĄD', 'Wpisz dane.');
+    if (!b || !p) return modal(window.L.js_error, window.L.js_enter_data);
     setL(get('btnGo'), 1);
     try {
         const id = crypto.randomUUID(), key = await derive(p, id, 'k'), iv = crypto.getRandomValues(new Uint8Array(12));
@@ -988,7 +949,7 @@ async function processStore() {
         get('v-create').classList.add('hidden'); get('v-result').classList.remove('hidden');
         const base = location.origin + '/receive/' + id;
         get('linkS').value = base; get('linkE').value = base + '#' + encodeURIComponent(p);
-    } catch (e) { modal('BŁĄD', 'Server error'); } finally { setL(get('btnGo'), 0); }
+    } catch (e) { modal(window.L.js_error, window.L.js_server_error); } finally { setL(get('btnGo'), 0); }
 }
 
 const CHUNK = 50 * 1024 * 1024;
@@ -996,10 +957,10 @@ const CONCURRENCY = 4;
 
 async function upl() {
     const f = get('f').files[0];
-    if (!f) return modal('INFO', 'Wybierz plik');
+    if (!f) return modal(window.L.js_info, window.L.js_select_file);
     setL(get('btnF'), 1);
     const m = get('fmsg');
-    m.innerText = 'Inicjowanie...';
+    m.innerText = window.L.js_initializing;
     try {
         const init = await (await fetch('/api/upload/init', { method: 'POST', body: JSON.stringify({ filename: f.name, size: f.size, password: get('fpwd').value, ttl: parseInt(get('fttl').value), limit: parseInt(get('flimit').value) }) })).json();
         if(init.error) throw new Error(init.error);
@@ -1019,7 +980,7 @@ async function upl() {
                 const partData = await res.json();
                 parts[i] = partData;
                 completed++;
-                m.innerText = 'Wysyłanie: ' + Math.round((completed / tot) * 100) + '%';
+                m.innerText = window.L.js_uploading + Math.round((completed / tot) * 100) + '%';
             }
         };
 
@@ -1028,7 +989,7 @@ async function upl() {
         await Promise.all(threads);
 
         await fetch('/api/upload/complete', { method: 'POST', body: JSON.stringify({ key: init.key, uploadId: init.uploadId, parts: parts, fileId: init.fileId }) });
-        m.innerText = 'Gotowe!';
+        m.innerText = window.L.js_done;
         get('f-res').classList.remove('hidden');
         const base = location.origin + '/share/' + init.fileId;
         get('flinkS').value = base;
@@ -1037,11 +998,11 @@ async function upl() {
             get('flinkE').value = base + '?pwd=' + encodeURIComponent(get('fpwd').value);
         }
         get('f').value = '';
-        get('dtxt').innerHTML = 'KLIKNIJ ABY WYBRAĆ PLIK';
+        get('dtxt').innerHTML = window.L.js_click_select;
         get('dtxt').parentNode.style.backgroundColor = 'var(--surface-2)';
         get('dtxt').parentNode.style.borderColor = 'var(--border-strong)';
         loadS();
-    } catch (e) { m.innerText = 'Błąd: ' + e.message; } finally { setL(get('btnF'), 0); }
+    } catch (e) { m.innerText = window.L.js_error_prefix + e.message; } finally { setL(get('btnF'), 0); }
 }
 
 async function loadS() {
@@ -1052,23 +1013,23 @@ async function loadS() {
         const p = (d.used / d.limit) * 100;
         get('bar').style.width = p + '%';
         if (p > 90) get('bar').style.background = 'var(--danger)';
-        get('st_txt').innerText = 'Użyto: ' + (d.used / 1e9).toFixed(2) + ' GB / 9.00 GB';
+        get('st_txt').innerText = window.L.js_used + (d.used / 1e9).toFixed(2) + ' GB / 9.00 GB';
         get('tbl').innerHTML = d.files.map(f => {
             const lim = f.max_downloads === -1 ? '\u221e' : f.max_downloads;
-            return '<tr><td>' + escapeHtml(f.filename) + '</td><td>' + (f.size / 1e6).toFixed(1) + 'MB</td><td style="color:var(--text-muted)">Pobrań: ' + f.download_count + '/' + lim + '</td><td style="text-align:right"><button class="btn-del" onclick="del(\\'' + f.id + '\\')">USUŃ</button></td></tr>';
+            return '<tr><td>' + escapeHtml(f.filename) + '</td><td>' + (f.size / 1e6).toFixed(1) + 'MB</td><td style="color:var(--text-muted)">' + window.L.js_downloads + f.download_count + '/' + lim + '</td><td style="text-align:right"><button class="btn-del" onclick="del(\\'' + f.id + '\\')">' + window.L.js_btn_delete + '</button></td></tr>';
         }).join('');
     } catch (e) { }
 }
 
 async function del(id) {
-    if (confirm('Usunąć plik trwale?')) {
+    if (confirm(window.L.js_confirm_delete)) {
         await fetch('/api/del/' + id, { method: 'DELETE' });
         loadS();
     }
 }
 
 async function start(p, bid) {
-    if (!p) return modal('BŁĄD', window.L.js_nopass);
+    if (!p) return modal(window.L.js_error, window.L.js_nopass);
     setL(get(bid), 1);
     try {
         const id = location.pathname.split('/').pop();
@@ -1098,7 +1059,7 @@ async function start(p, bid) {
         };
         setInterval(tick, 1000);
         tick();
-    } catch (e) { modal('BŁĄD', e.message); } finally { setL(get(bid), 0); }
+    } catch (e) { modal(window.L.js_error, e.message); } finally { setL(get(bid), 0); }
 }
 
 const unlockM = () => start(get('recvP').value, 'btnM');
@@ -1109,86 +1070,88 @@ if (location.hash.length > 1 && get('m-auto')) {
     get('m-manual').classList.add('hidden');
     get('m-auto').classList.remove('hidden');
 }
+${LANG_PICKER_JS}
 </script>
 `
 
-const BASE_HTML = (body: string): string =>
-  `<!DOCTYPE html><html lang="pl"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Edge Secrets</title><style>${CSS}</style></head><body><button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" title="Toggle theme">☀</button>${body}<div class="overlay" id="qrOv" onclick="if(event.target===this)this.style.display='none'" style="display:none"><div class="modal" style="max-width:280px;padding:28px"><h3 style="margin-bottom:18px">KOD QR</h3><img id="qrImg" class="qr-modal-img" alt="QR Code" src=""><p id="qrTxt" style="font-size:0.6rem;word-break:break-all;color:var(--text-muted);margin-bottom:18px;text-align:center;line-height:1.5"></p><button class="modal-btn" onclick="get('qrOv').style.display='none'">ZAMKNIJ</button></div></div>${CLIENT_JS}</body></html>`
+const BASE_HTML = (body: string, langCode: LangCode = 'en', langPickerHtml: string = ''): string =>
+  `<!DOCTYPE html><html lang="${langCode}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Edge Secrets</title><style>${CSS}</style></head><body><button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" title="Toggle theme">\u2600</button>${langPickerHtml}${body}<div class="overlay" id="qrOv" onclick="if(event.target===this)this.style.display='none'" style="display:none"><div class="modal" style="max-width:280px;padding:28px"><h3 style="margin-bottom:18px" id="qrTitle"></h3><img id="qrImg" class="qr-modal-img" alt="QR Code" src=""><p id="qrTxt" style="font-size:0.6rem;word-break:break-all;color:var(--text-muted);margin-bottom:18px;text-align:center;line-height:1.5"></p><button class="modal-btn" onclick="get('qrOv').style.display='none'" id="qrCloseBtn"></button></div></div>${CLIENT_JS}</body></html>`
 
-function renderGen(type: string): string {
+function renderGen(type: string, t: Translations, langCode: LangCode): string {
   const isLink = type === 'link'
   const isFile = type === 'file'
   const isCred = !isLink && !isFile
+  const lp = renderLangPicker(langCode)
   const body = `
-  <script>window.L = ${JSON.stringify(I18N.pl)};</script>
+  <script>window.L = ${JSON.stringify(t)};</script>
   <div class="card">
       <div class="brand-header"><span class="brand-logo" id="brandName">EDGE SECRETS</span><p class="brand-tagline" id="brandTagline" style="display:none"></p></div>
       <div class="tabs">
-          <a href="?t=cred" class="tab ${isCred ? 'active' : ''}">POŚWIADCZENIA</a>
-          <a href="?t=file" class="tab ${isFile ? 'active' : ''}">PLIKI (5GB)</a>
-          <a href="?t=link" class="tab ${isLink ? 'active' : ''}">LINKI</a>
+          <a href="?t=cred" class="tab ${isCred ? 'active' : ''}">${t.tab_creds}</a>
+          <a href="?t=file" class="tab ${isFile ? 'active' : ''}">${t.tab_files}</a>
+          <a href="?t=link" class="tab ${isLink ? 'active' : ''}">${t.tab_links}</a>
       </div>
       ${
         isCred
           ? `
       <div id="v-create">
-          <div class="label-row"><span>TREŚĆ SEKRETU</span><span class="action-link" onclick="genS()">GENERUJ HASŁO</span></div>
-          <textarea id="body" placeholder="Wklej poufne dane tutaj..."></textarea>
-          <div class="label-row"><span>KLUCZ SZYFRUJĄCY</span><span class="action-link" onclick="genK()">LOSUJ KLUCZ</span></div>
-          <input type="text" id="pass" placeholder="Hasło do odblokowania...">
-          <div class="label-row"><span>CZAS WYGAŚNIĘCIA</span></div>
-          <select id="ttl"><option value="3600">1 Godzina</option><option value="86400" selected>24 Godziny</option><option value="259200">72 Godziny</option></select>
-          <button class="btn" onclick="processStore()" id="btnGo"><span>GENERUJ LINKI</span><div class="spinner"></div></button>
+          <div class="label-row"><span>${t.label_secret}</span><span class="action-link" onclick="genS()">${t.action_gen_password}</span></div>
+          <textarea id="body" placeholder="${t.placeholder_secret}"></textarea>
+          <div class="label-row"><span>${t.label_encrypt_key}</span><span class="action-link" onclick="genK()">${t.action_gen_key}</span></div>
+          <input type="text" id="pass" placeholder="${t.placeholder_encrypt}">
+          <div class="label-row"><span>${t.label_ttl}</span></div>
+          <select id="ttl"><option value="3600">${t.ttl_1h}</option><option value="86400" selected>${t.ttl_24h}</option><option value="259200">${t.ttl_72h}</option></select>
+          <button class="btn" onclick="processStore()" id="btnGo"><span>${t.btn_generate_links}</span><div class="spinner"></div></button>
       </div>
       <div id="v-result" class="hidden">
           <div class="res-box">
-              <div class="label-row">OPCJA 1: MANUAL (BEZ HASŁA)</div>
-              <div class="input-group"><input type="text" id="linkS" readonly onclick="this.select()"><button class="btn-copy" onclick="copyBtn(this, get('linkS').value)">KOPIUJ</button><button class="btn-qr" onclick="showQR(get('linkS').value)" title="Kod QR">QR</button></div>
-              <div class="label-row">OPCJA 2: FAST (LINK Z HASŁEM)</div>
-              <div class="input-group"><input type="text" id="linkE" readonly onclick="this.select()"><button class="btn-copy" onclick="copyBtn(this, get('linkE').value)">KOPIUJ</button><button class="btn-qr" onclick="showQR(get('linkE').value)" title="Kod QR">QR</button></div>
+              <div class="label-row">${t.option1_manual}</div>
+              <div class="input-group"><input type="text" id="linkS" readonly onclick="this.select()"><button class="btn-copy" onclick="copyBtn(this, get('linkS').value)">${t.copy}</button><button class="btn-qr" onclick="showQR(get('linkS').value)" title="QR">QR</button></div>
+              <div class="label-row">${t.option2_fast}</div>
+              <div class="input-group"><input type="text" id="linkE" readonly onclick="this.select()"><button class="btn-copy" onclick="copyBtn(this, get('linkE').value)">${t.copy}</button><button class="btn-qr" onclick="showQR(get('linkE').value)" title="QR">QR</button></div>
           </div>
-          <button class="btn" style="background:transparent; color:var(--text); border:1px solid var(--border-strong); margin-top:20px;" onclick="location.reload()">NOWA OPERACJA</button>
+          <button class="btn" style="background:transparent; color:var(--text); border:1px solid var(--border-strong); margin-top:20px;" onclick="location.reload()">${t.btn_new_operation}</button>
       </div>`
           : isFile ? `
       <div id="v-file-upload">
           <div class="drop-zone" onclick="get('f').click()">
               <div style="font-size:30px; margin-bottom:10px;">
-                  <span id="dtxt" style="font-weight:600; font-size:0.85rem; color:var(--accent); letter-spacing:0.06em;">KLIKNIJ ABY WYBRAĆ PLIK</span>
+                  <span id="dtxt" style="font-weight:600; font-size:0.85rem; color:var(--accent); letter-spacing:0.06em;">${t.js_click_select}</span>
               </div>
           </div>
           <input type="file" id="f" style="display:none" onchange="showFile()">
-          <div class="label-row">HASŁO (OPCJONALNE)</div>
-          <input type="text" id="fpwd" placeholder="Zostaw puste dla linku publicznego">
+          <div class="label-row">${t.label_pwd_optional}</div>
+          <input type="text" id="fpwd" placeholder="${t.placeholder_leave_empty}">
           <div style="display:flex; gap:15px">
-              <div style="flex:1"><div class="label-row">RETENCJA</div><select id="fttl"><option value="43200000">12 Godzin</option><option value="172800000" selected>2 Dni</option><option value="604800000">7 Dni</option></select></div>
-              <div style="flex:1"><div class="label-row">LIMIT POBRAŃ</div><select id="flimit"><option value="1" selected>1 Raz</option><option value="5">5 Razy</option><option value="-1">Bez limitu</option></select></div>
+              <div style="flex:1"><div class="label-row">${t.label_retention}</div><select id="fttl"><option value="43200000">${t.ttl_12h}</option><option value="172800000" selected>${t.ttl_2d}</option><option value="604800000">${t.ttl_7d}</option></select></div>
+              <div style="flex:1"><div class="label-row">${t.label_download_limit}</div><select id="flimit"><option value="1" selected>${t.limit_1}</option><option value="5">${t.limit_5}</option><option value="-1">${t.limit_unlimited}</option></select></div>
           </div>
-          <button class="btn" onclick="upl()" id="btnF"><span>WYŚLIJ PLIK</span><div class="spinner"></div></button>
+          <button class="btn" onclick="upl()" id="btnF"><span>${t.btn_send_file}</span><div class="spinner"></div></button>
           <div id="fmsg" style="margin-top:15px; font-weight:600; text-align:center; color:var(--accent); font-size:0.85rem; letter-spacing:0.04em;"></div>
           <div class="res-box hidden" id="f-res">
-             <div class="label-row">OPCJA 1: MANUAL (BEZ HASŁA)</div>
-             <div class="input-group"><input type="text" id="flinkS" readonly onclick="this.select()"><button class="btn-copy" onclick="copyBtn(this, get('flinkS').value)">KOPIUJ</button><button class="btn-qr" onclick="showQR(get('flinkS').value)" title="Kod QR">QR</button></div>
-             <div id="f-auto-row" class="hidden"><div class="label-row">OPCJA 2: FAST (LINK Z HASŁEM)</div><div class="input-group"><input type="text" id="flinkE" readonly onclick="this.select()"><button class="btn-copy" onclick="copyBtn(this, get('flinkE').value)">KOPIUJ</button><button class="btn-qr" onclick="showQR(get('flinkE').value)" title="Kod QR">QR</button></div></div>
+             <div class="label-row">${t.option1_manual}</div>
+             <div class="input-group"><input type="text" id="flinkS" readonly onclick="this.select()"><button class="btn-copy" onclick="copyBtn(this, get('flinkS').value)">${t.copy}</button><button class="btn-qr" onclick="showQR(get('flinkS').value)" title="QR">QR</button></div>
+             <div id="f-auto-row" class="hidden"><div class="label-row">${t.option2_fast}</div><div class="input-group"><input type="text" id="flinkE" readonly onclick="this.select()"><button class="btn-copy" onclick="copyBtn(this, get('flinkE').value)">${t.copy}</button><button class="btn-qr" onclick="showQR(get('flinkE').value)" title="QR">QR</button></div></div>
           </div>
       </div>
       <div style="margin-top:36px; padding-top:20px; border-top:1px solid var(--border);">
-          <div class="label-row">STORAGE</div>
-          <div class="storage-info"><span id="st_txt">Ładowanie...</span></div>
+          <div class="label-row">${t.label_storage}</div>
+          <div class="storage-info"><span id="st_txt">${t.loading}</span></div>
           <div class="timer-wrap"><div id="bar" class="timer-fill"></div></div>
           <table id="tbl"><tbody></tbody></table>
       </div>` : `
       <div id="v-link">
-          <div class="label-row"><span>DOCELOWY URL</span></div>
+          <div class="label-row"><span>${t.label_target_url}</span></div>
           <input type="url" id="lurl" placeholder="https://..." autocomplete="off">
           <div style="display:flex;gap:15px">
-              <div style="flex:1"><div class="label-row">WYGAŚNIĘCIE</div><select id="lttl"><option value="3600">1 Godzina</option><option value="86400" selected>24 Godziny</option><option value="604800">7 Dni</option><option value="-1">Nigdy</option></select></div>
-              <div style="flex:1"><div class="label-row">LIMIT KLIKNIĘĆ</div><select id="lclicks"><option value="1">1 Raz</option><option value="10">10 Razy</option><option value="100">100 Razy</option><option value="-1" selected>Bez limitu</option></select></div>
+              <div style="flex:1"><div class="label-row">${t.label_expiry}</div><select id="lttl"><option value="3600">${t.ttl_1h}</option><option value="86400" selected>${t.ttl_24h}</option><option value="604800">${t.ttl_7d}</option><option value="-1">${t.ttl_never}</option></select></div>
+              <div style="flex:1"><div class="label-row">${t.label_click_limit}</div><select id="lclicks"><option value="1">${t.limit_1}</option><option value="10">${t.limit_10}</option><option value="100">${t.limit_100}</option><option value="-1" selected>${t.limit_unlimited}</option></select></div>
           </div>
-          <button class="btn" onclick="shorten()" id="btnLink"><span>SKRÓĆ LINK</span><div class="spinner"></div></button>
+          <button class="btn" onclick="shorten()" id="btnLink"><span>${t.btn_shorten}</span><div class="spinner"></div></button>
           <div class="res-box hidden" id="link-res">
-              <div class="label-row">SKRÓCONY LINK</div>
-              <div class="input-group"><input type="text" id="shortLink" readonly onclick="this.select()"><button class="btn-copy" onclick="copyBtn(this,get('shortLink').value)">KOPIUJ</button><button class="btn-qr" onclick="showQR(get('shortLink').value)" title="Kod QR">QR</button></div>
-              <button class="btn" style="background:transparent;color:var(--text);border:1px solid var(--border-strong);margin-top:16px" onclick="get('link-res').classList.add('hidden');get('lurl').value='';get('lurl').focus()">NOWY LINK</button>
+              <div class="label-row">${t.label_short_link}</div>
+              <div class="input-group"><input type="text" id="shortLink" readonly onclick="this.select()"><button class="btn-copy" onclick="copyBtn(this,get('shortLink').value)">${t.copy}</button><button class="btn-qr" onclick="showQR(get('shortLink').value)" title="QR">QR</button></div>
+              <button class="btn" style="background:transparent;color:var(--text);border:1px solid var(--border-strong);margin-top:16px" onclick="get('link-res').classList.add('hidden');get('lurl').value='';get('lurl').focus()">${t.btn_new_link}</button>
           </div>
       </div>`
       }
@@ -1198,7 +1161,7 @@ function renderGen(type: string): string {
   </div>
   <div class="cfg-panel hidden" id="cfgPanel">
     <div class="cfg-section">
-      <div class="cfg-section-label">Akcent</div>
+      <div class="cfg-section-label">${t.cfg_accent}</div>
       <div class="cfg-presets">
         <div class="cfg-preset" style="background:#818cf8" onclick="pickPreset('#818cf8')" title="Indigo"></div>
         <div class="cfg-preset" style="background:#a78bfa" onclick="pickPreset('#a78bfa')" title="Violet"></div>
@@ -1217,7 +1180,7 @@ function renderGen(type: string): string {
     </div>
     <div class="cfg-divider"></div>
     <div class="cfg-section">
-      <div class="cfg-section-label">Tło</div>
+      <div class="cfg-section-label">${t.cfg_bg}</div>
       <div class="cfg-presets">
         <div class="cfg-preset-bg" style="background:#000000;border:1px solid rgba(255,255,255,0.15)" onclick="pickBgPreset('#000000')" title="Pure Black"></div>
         <div class="cfg-preset-bg" style="background:#080810" onclick="pickBgPreset('#080810')" title="Indigo Black"></div>
@@ -1235,36 +1198,37 @@ function renderGen(type: string): string {
     </div>
     <div class="cfg-divider"></div>
     <div class="cfg-section">
-      <div class="cfg-section-label">Branding</div>
+      <div class="cfg-section-label">${t.cfg_branding}</div>
       <div class="cfg-row" style="margin-bottom:8px">
-        <span class="cfg-label">Nazwa</span>
+        <span class="cfg-label">${t.cfg_name}</span>
         <input type="text" class="cfg-input" id="cfgBrandName" placeholder="EDGE SECRETS" maxlength="32" oninput="previewBrand()">
       </div>
       <div class="cfg-row">
-        <span class="cfg-label">Tagline</span>
-        <input type="text" class="cfg-input" id="cfgTagline" placeholder="Opcjonalny podpis..." maxlength="60" oninput="previewBrand()">
+        <span class="cfg-label">${t.cfg_tagline_label}</span>
+        <input type="text" class="cfg-input" id="cfgTagline" placeholder="${t.cfg_tagline_placeholder}" maxlength="60" oninput="previewBrand()">
       </div>
     </div>
     <div class="cfg-divider"></div>
     <div class="cfg-section">
-      <div class="cfg-section-label">Logo <span style="font-weight:400;opacity:0.6">PNG / SVG / WebP, max 256 KB</span></div>
+      <div class="cfg-section-label">${t.cfg_logo_label} <span style="font-weight:400;opacity:0.6">${t.cfg_logo_specs}</span></div>
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
         <img id="logoPreview" class="cfg-logo-preview" src="/ui/logo" onload="this.style.display='inline-block'" onerror="this.style.display='none'" style="display:none">
-        <span class="cfg-label" id="logoStatus">Brak logo</span>
+        <span class="cfg-label" id="logoStatus">${t.js_no_logo}</span>
       </div>
       <div style="display:flex;gap:6px">
-        <span class="cfg-upload" onclick="get('logoInput').click()">WGRAJ</span>
-        <span class="cfg-upload cfg-upload-del" onclick="removeLogo()">USUŃ</span>
+        <span class="cfg-upload" onclick="get('logoInput').click()">${t.cfg_upload}</span>
+        <span class="cfg-upload cfg-upload-del" onclick="removeLogo()">${t.cfg_delete}</span>
       </div>
       <input type="file" id="logoInput" accept="image/png,image/svg+xml,image/jpeg,image/webp" style="display:none" onchange="uploadLogo()">
     </div>
     <div class="cfg-divider"></div>
-    <button class="cfg-save" id="cfgSave" onclick="saveConfig()">ZAPISZ</button>
+    <button class="cfg-save" id="cfgSave" onclick="saveConfig()">${t.js_save}</button>
   </div>`
-  return BASE_HTML(body)
+  return BASE_HTML(body, langCode, lp)
 }
 
-function renderReceiveCred(_id: string, lang: Lang): string {
+function renderReceiveCred(_id: string, lang: Lang, langCode: LangCode): string {
+  const lp = renderLangPicker(langCode)
   const body = `
   <script>window.L = ${JSON.stringify(lang)};</script>
   <div class="card">
@@ -1289,11 +1253,12 @@ function renderReceiveCred(_id: string, lang: Lang): string {
       <button class="btn" style="margin-top:20px;" onclick="copyBtn(this, get('content').innerText)"><span>${lang.btn_copy}</span></button>
     </div>
   </div><div id="ov" class="overlay"><div class="modal"><h3 id="mT"></h3><p id="mMsg"></p><button class="modal-btn" onclick="get('ov').style.display='none'">OK</button></div></div>`
-  return BASE_HTML(body)
+  return BASE_HTML(body, langCode, lp)
 }
 
-function renderReceiveFile(filename: string, lang: Lang): string {
+function renderReceiveFile(filename: string, lang: Lang, langCode: LangCode): string {
   const safeName = escapeHtml(filename) as string
+  const lp = renderLangPicker(langCode)
   const body = `
   <script>window.L = ${JSON.stringify(lang)};</script>
   <div class="card">
@@ -1309,5 +1274,5 @@ function renderReceiveFile(filename: string, lang: Lang): string {
           <button class="btn"><span>${lang.btn_unlock}</span></button>
       </form>
   </div><div id="ov" class="overlay"><div class="modal"><h3 id="mT"></h3><p id="mMsg"></p><button class="modal-btn" onclick="get('ov').style.display='none'">OK</button></div></div>`
-  return BASE_HTML(body)
+  return BASE_HTML(body, langCode, lp)
 }
