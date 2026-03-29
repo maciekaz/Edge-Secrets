@@ -1230,7 +1230,6 @@ function onTurnstileSuccess(token) {
   var w = get('tsWidget'); if (w) w.style.display = 'none';
   if (_autoMode) {
     var btnA = get('btnA'); if (btnA) btnA.classList.remove('hidden');
-    unlockA();
   } else {
     var btnM = get('btnM'); if (btnM) btnM.classList.remove('hidden');
   }
