@@ -36,6 +36,7 @@ All UI text is managed in `src/i18n.ts` - a self-contained module with no extern
 | `uk` | Українська |
 | `pt` | Português |
 | `zh` | 中文 (Simplified) |
+| `cs` | Čeština |
 
 ### Language resolution - per user, not global
 
