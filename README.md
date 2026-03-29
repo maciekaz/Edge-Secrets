@@ -28,17 +28,7 @@ Running a secrets tool on Cloudflare Workers is not just a cost decision - it ch
 
 **No servers, no attack surface.** There is no VM to patch, no open SSH port, no container to harden. The entire runtime is ephemeral and managed by Cloudflare. Your only security responsibility is the application code itself.
 
-**Native CI/CD integration.** Because everything is behind a versioned REST API (`/api/v1/`), injecting secrets into pipelines is trivial. A GitHub Actions step, a GitLab CI job, or a shell script can push a one-time credential to a recipient without any human in the loop - authenticated via a Cloudflare Access service token, burned on first read.
-
-```yaml
-# Example: push a deploy token to a recipient from GitHub Actions
-- name: Share deploy token
-  run: |
-    curl -s -X POST https://secret.example.com/api/v1/admin/secrets \
-      -H "Cf-Access-Jwt-Assertion: ${{ secrets.CF_SERVICE_TOKEN }}" \
-      -H "Content-Type: application/json" \
-      -d "$( node scripts/encrypt-secret.js "$TOKEN" )"
-```
+**Native CI/CD integration.** Because everything is behind a versioned REST API (`/api/v1/`), injecting secrets into pipelines is trivial. A GitHub Actions step, a GitLab CI job, or a shell script can push a one-time credential to a recipient without any human in the loop - authenticated via a Cloudflare Access service token, burned on first read which can be used also by machine.
 
 **Scales to zero, scales to bursts.** Idle periods cost nothing. Traffic spikes are absorbed automatically by Cloudflare's infrastructure - no autoscaling groups, no capacity planning.
 
