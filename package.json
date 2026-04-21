@@ -9,12 +9,12 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "hono": "^4.12.7",
+    "hono": "^4.12.14",
     "qrcode-generator": "^2.0.4"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20241022.0",
     "typescript": "^5.6.0",
-    "wrangler": "^4.78.0"
+    "wrangler": "^4.84.1"
   }
 }
