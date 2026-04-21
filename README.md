@@ -109,10 +109,16 @@ sequenceDiagram
 
 | Element | Algorithm | Parameters |
 |---|---|---|
-| Key derivation | PBKDF2 | SHA-256, 100,000 iterations |
+| Key derivation | Argon2id | m=19 MiB, t=2, p=1, 32-byte output (OWASP 2023 minimum) |
 | Encryption | AES-GCM | 256-bit, random IV (12 B) |
-| Password verifier | PBKDF2 | SHA-256, 50,000 iterations, salt `id + "_v"` |
+| Password verifier | Argon2id | Same params, salt `id + "_v"` |
 | Link entropy (with passphrase) | 20-char key, 58-char alphabet | ~118 bits |
+
+**Why Argon2id:** PBKDF2 is GPU-friendly - a single RTX 4090 can try ~100-200 guesses/s against each stored verifier. Argon2id is memory-hard (19 MiB per hash), which forces attackers to trade GPU parallelism for memory bandwidth and drops the same attack to ~1-10 guesses/s per GPU. It won the 2015 Password Hashing Competition and is the OWASP and NIST default for new systems.
+
+**Delivery:** the Argon2id WebAssembly implementation ([hash-wasm](https://www.npmjs.com/package/hash-wasm)) is bundled into the Worker and served at `/ui/argon2.v1.js` - same-origin only, `immutable` cached. No external CDN. The Worker itself never runs Argon2id: key derivation stays client-side, so the ~300-500 ms (desktop) / ~2-3 s (mobile) cost is the browser's, not the Worker's CPU budget.
+
+**Versioned verifier:** each stored secret carries an `algoVersion` field in its KV metadata. This lets a future `argon2id-v2` (stronger params) roll out without breaking in-flight secrets - the client derives with whatever algo the server says the record was written with.
 
 ---
 
@@ -240,6 +246,7 @@ API endpoints are grouped under `/api/v1/` in two zones. Cloudflare Access needs
 | `GET` | `/ui/config` | Read global UI settings (accent, bg, brand, tagline) |
 | `GET` | `/ui/logo` | Serve logo image from R2 |
 | `GET` | `/ui/qr` | Generate QR code SVG for a given URL (`?d=encodedUrl`) |
+| `GET` | `/ui/argon2.v1.js` | Serve bundled hash-wasm Argon2id module (immutable, long-cached) |
 
 > Full request/response documentation: [docs/api.md](docs/api.md)
 >

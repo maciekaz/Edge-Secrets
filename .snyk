@@ -10,6 +10,9 @@ version: v1.25.0
 exclude:
   code:
     - src/i18n.ts
+    # Bundled build output — same i18n FPs leak into the bundled source; not
+    # worth re-triaging the minified copy.
+    - dist/**
 
 # Snyk Open Source ignores (currently empty).
 ignore: {}

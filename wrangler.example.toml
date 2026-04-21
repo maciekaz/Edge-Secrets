@@ -25,3 +25,10 @@ bucket_name = "secret-files"
 
 [triggers]
 crons = ["0 * * * *"]
+
+# Bundle hash-wasm's UMD Argon2id build as a text asset so the Worker can
+# serve it to the browser at /ui/argon2.v1.js (same-origin, CSP-friendly).
+[[rules]]
+type = "Text"
+globs = ["**/argon2.umd.min.js"]
+fallthrough = true

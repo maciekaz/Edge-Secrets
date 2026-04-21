@@ -9,6 +9,7 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "hash-wasm": "^4.12.0",
     "hono": "^4.12.14",
     "qrcode-generator": "^2.0.4"
   },

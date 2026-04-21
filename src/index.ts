@@ -3,6 +3,8 @@ import { cors } from 'hono/cors'
 import { getCookie } from 'hono/cookie'
 import qrcode from 'qrcode-generator'
 import { getLang, renderLangPicker, LANG_PICKER_CSS, LANG_PICKER_JS, type Translations, type LangCode } from './i18n'
+// Bundled via wrangler's Text rule — returns the minified UMD source as a string.
+import ARGON2_UMD_JS from 'hash-wasm/dist/argon2.umd.min.js'
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -13,6 +15,13 @@ const CONFIG = {
   maxStorage: 9 * 1024 * 1024 * 1024,
   visualTtl: 300,
 } as const
+
+// Key-derivation algorithm label stored with each secret. Single-value union
+// for now; kept as a union type so a future `argon2id-v2` (e.g. stronger
+// params) can be added without reshaping the KV metadata schema.
+// `argon2id-v1` uses OWASP 2023 minimums: m=19456 KiB, t=2, p=1, 32-byte output.
+type AlgoVersion = 'argon2id-v1'
+const CURRENT_ALGO: AlgoVersion = 'argon2id-v1'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -44,6 +53,7 @@ interface FileRecord {
 interface SecretMetadata {
   verifier: string
   attempts: number
+  algoVersion?: AlgoVersion
 }
 
 interface LinkMetadata {
@@ -58,6 +68,7 @@ interface StoreBody {
   encryptedData: string
   verifier: string
   ttl: string | number
+  algoVersion?: AlgoVersion
 }
 
 interface UploadInitBody {
@@ -80,7 +91,7 @@ interface UploadCompleteBody {
 const HTML_SECURITY_HEADERS: Record<string, string> = {
   'Content-Type': 'text/html;charset=UTF-8',
   'Content-Security-Policy':
-    "default-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com; script-src 'unsafe-inline' https://challenges.cloudflare.com; style-src 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data:; connect-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; object-src 'none'; frame-ancestors 'none';",
+    "default-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://challenges.cloudflare.com; style-src 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data:; connect-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; object-src 'none'; frame-ancestors 'none';",
   'X-Frame-Options': 'DENY',
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer',
@@ -298,13 +309,19 @@ app.get('/gen', (c) => {
 
 app.get('/receive/:id', async (c) => {
   const { t, code } = getLang(c.req.raw)
-  const [tsEnabled, tsSiteKey] = await Promise.all([
+  const id = c.req.param('id')
+  const [tsEnabled, tsSiteKey, meta] = await Promise.all([
     c.env.SECRETS_STORE.get('ui:turnstile_creds'),
     c.env.SECRETS_STORE.get('ui:turnstile_site_key'),
+    c.env.SECRETS_STORE.getWithMetadata<SecretMetadata>(id).then((r) => r.metadata),
   ])
   const turnstileActive = tsEnabled === '1' && !!tsSiteKey && !!c.env.TURNSTILE_SECRET
+  // All stored secrets use the current algo now that the PBKDF2 legacy path
+  // is gone. Any pre-cleanup record without algoVersion will fail decrypt at
+  // the verifier step (expected — those secrets expired with the 7-day TTL).
+  const algoVersion: AlgoVersion = meta?.algoVersion ?? CURRENT_ALGO
   return c.html(
-    renderReceiveCred(c.req.param('id'), t, code, turnstileActive ? tsSiteKey! : null),
+    renderReceiveCred(id, t, code, turnstileActive ? tsSiteKey! : null, algoVersion),
     200,
     HTML_SECURITY_HEADERS
   )
@@ -312,6 +329,19 @@ app.get('/receive/:id', async (c) => {
 
 app.get('/share/:id', (c) => handleFileDownload(c))
 app.post('/share/:id', (c) => handleFilePost(c))
+
+// Argon2id bundle — served same-origin so CSP stays tight. Versioned path so
+// the response can be cached aggressively; bump the suffix (v1 → v2) if we
+// ever swap hash-wasm for a different build.
+app.get('/ui/argon2.v1.js', () => {
+  return new Response(ARGON2_UMD_JS, {
+    headers: {
+      'Content-Type': 'application/javascript; charset=utf-8',
+      'Cache-Control': 'public, max-age=31536000, immutable',
+      'X-Content-Type-Options': 'nosniff',
+    },
+  })
+})
 
 // QR code generator — public, server-side SVG rendering
 app.get('/ui/qr', (c) => {
@@ -516,12 +546,17 @@ app.delete('/api/v1/admin/ui/logo', async (c) => {
 // Store encrypted secret in KV
 app.post('/api/v1/admin/secrets', async (c) => {
   const body = await c.req.json<StoreBody>()
+  // Only trust algoVersion values we actually ship; fall back to the current
+  // algo so a tampered/absent field can't silently pin a secret to an
+  // unsupported scheme.
+  const algoVersion: AlgoVersion =
+    body.algoVersion === 'argon2id-v1' ? body.algoVersion : CURRENT_ALGO
   await c.env.SECRETS_STORE.put(body.id, body.encryptedData, {
     expirationTtl: Math.min(
       parseInt(String(body.ttl)) || CONFIG.defaultTtl,
       CONFIG.maxTtl
     ),
-    metadata: { verifier: body.verifier, attempts: 0 } satisfies SecretMetadata,
+    metadata: { verifier: body.verifier, attempts: 0, algoVersion } satisfies SecretMetadata,
   })
   return c.json({ success: true })
 })
@@ -1087,14 +1122,37 @@ function showFile() {
     }
 }
 
+// OWASP 2023 Argon2id minimum — m=19 MiB, t=2, p=1, 32-byte output.
+// Chosen so a modern laptop derives a key in ~300-500ms and mid-range mobile
+// stays under ~3s. Do not lower without re-checking OWASP guidance.
+const ARGON2_PARAMS = { memorySize: 19456, iterations: 2, parallelism: 1, hashLength: 32 };
+
+// hash-wasm is loaded via /ui/argon2.v1.js and attaches itself to window.hashwasm.
+// We poll briefly in case derive() fires before the <script> finishes parsing.
+async function _awaitHashwasm() {
+    if (window.hashwasm && window.hashwasm.argon2id) return window.hashwasm;
+    for (let i = 0; i < 50; i++) {
+        await new Promise(r => setTimeout(r, 100));
+        if (window.hashwasm && window.hashwasm.argon2id) return window.hashwasm;
+    }
+    throw new Error('argon2 unavailable');
+}
+
 async function derive(p, s, t) {
     const enc = new TextEncoder();
-    const km = await crypto.subtle.importKey("raw", enc.encode(p), { name: "PBKDF2" }, false, ["deriveKey", "deriveBits"]);
-    if (t === 'v') {
-        const b = await crypto.subtle.deriveBits({ name: "PBKDF2", salt: enc.encode(s + "_v"), iterations: 50000, hash: "SHA-256" }, km, 256);
-        return btoa(String.fromCharCode(...new Uint8Array(b)));
-    }
-    return crypto.subtle.deriveKey({ name: "PBKDF2", salt: enc.encode(s), iterations: 100000, hash: "SHA-256" }, km, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+    const hw = await _awaitHashwasm();
+    const salt = enc.encode(t === 'v' ? s + '_v' : s);
+    const bytes = await hw.argon2id({
+        password: enc.encode(p),
+        salt,
+        parallelism: ARGON2_PARAMS.parallelism,
+        iterations: ARGON2_PARAMS.iterations,
+        memorySize: ARGON2_PARAMS.memorySize,
+        hashLength: ARGON2_PARAMS.hashLength,
+        outputType: 'binary',
+    });
+    if (t === 'v') return btoa(String.fromCharCode.apply(null, bytes));
+    return crypto.subtle.importKey('raw', bytes, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
 }
 
 const genS = () => { const c = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ0123456789!?@"; let p = ""; const r = new Uint32Array(15); crypto.getRandomValues(r); for (let i = 0; i < 15; i++) p += c[r[i] % c.length]; if (get('body')) get('body').value = p; };
@@ -1107,7 +1165,7 @@ async function processStore() {
     try {
         const id = crypto.randomUUID(), key = await derive(p, id, 'k'), iv = crypto.getRandomValues(new Uint8Array(12));
         const enc = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(b)), vf = await derive(p, id, 'v');
-        await fetch('/api/v1/admin/secrets', { method: 'POST', body: JSON.stringify({ id, verifier: vf, ttl, encryptedData: JSON.stringify({ iv: btoa(String.fromCharCode(...iv)), d: btoa(String.fromCharCode(...new Uint8Array(enc))) }) }) });
+        await fetch('/api/v1/admin/secrets', { method: 'POST', body: JSON.stringify({ id, verifier: vf, ttl, algoVersion: window.__algo || 'argon2id-v1', encryptedData: JSON.stringify({ iv: btoa(String.fromCharCode(...iv)), d: btoa(String.fromCharCode(...new Uint8Array(enc))) }) }) });
         get('v-create').classList.add('hidden'); get('v-result').classList.remove('hidden');
         const base = location.origin + '/receive/' + id;
         get('linkS').value = base; get('linkE').value = base + '#' + encodeURIComponent(p);
@@ -1208,6 +1266,7 @@ async function start(p, bid) {
         const dec = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, buf);
         get('m-manual').classList.add('hidden');
         get('m-auto').classList.add('hidden');
+        ['btnM', 'btnA', 'tsWidget'].forEach(id => { const el = get(id); if (el) el.classList.add('hidden'); });
         get('v-decrypted').classList.remove('hidden');
         get('content').innerText = new TextDecoder().decode(dec);
         let tl = 300;
@@ -1269,7 +1328,8 @@ function renderGen(type: string, t: Translations, langCode: LangCode): string {
   const isCred = !isLink && !isFile
   const lp = renderLangPicker(langCode)
   const body = `
-  <script>window.L = ${JSON.stringify(t)};</script>
+  <script>window.L = ${JSON.stringify(t)}; window.__algo = ${JSON.stringify(CURRENT_ALGO)};</script>
+  <script src="/ui/argon2.v1.js"></script>
   <div class="card">
       <div class="brand-header"><span class="brand-logo" id="brandName">EDGE SECRETS</span><p class="brand-tagline" id="brandTagline" style="display:none"></p></div>
       <div class="tabs">
@@ -1429,7 +1489,7 @@ function renderGen(type: string, t: Translations, langCode: LangCode): string {
   return BASE_HTML(body, langCode, lp)
 }
 
-function renderReceiveCred(_id: string, lang: Lang, langCode: LangCode, turnstileSiteKey: string | null): string {
+function renderReceiveCred(_id: string, lang: Lang, langCode: LangCode, turnstileSiteKey: string | null, algoVersion: AlgoVersion): string {
   const lp = renderLangPicker(langCode)
   const tsWidget = turnstileSiteKey
     ? `<div id="tsWidget" class="ts-verify-wrap"><span class="ts-verify-label">${lang.ts_verify}</span><div class="cf-turnstile" data-sitekey="${escapeHtml(turnstileSiteKey)}" data-callback="onTurnstileSuccess" data-theme="auto"></div></div>`
@@ -1438,7 +1498,8 @@ function renderReceiveCred(_id: string, lang: Lang, langCode: LangCode, turnstil
     ? `<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>`
     : ''
   const body = `
-  <script>window.L = ${JSON.stringify(lang)};</script>
+  <script>window.L = ${JSON.stringify(lang)}; window.__algo = ${JSON.stringify(algoVersion)};</script>
+  <script src="/ui/argon2.v1.js"></script>
   <div class="card">
     <div class="brand-header"><span class="brand-logo">EDGE SECRETS</span></div>
     <h2 style="text-align:center; font-size:1.1rem; margin-bottom:24px; color:var(--text); font-weight:600; letter-spacing:0.04em;">${lang.title_cred}</h2>
