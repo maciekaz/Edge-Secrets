@@ -32,58 +32,67 @@ Store an encrypted secret in KV.
   "id": "string",
   "encryptedData": "string",
   "verifier": "string",
-  "ttl": 86400
+  "ttl": 86400,
+  "algoVersion": "argon2id-v1"
 }
 ```
+
+- `algoVersion` is optional. Only `argon2id-v1` is accepted today; any other value (or an absent field) is coerced server-side to the current algo, so a tampered client cannot silently pin a secret to a weaker scheme.
+- The server additionally records `attempts: 0` and `expiresAt` (absolute epoch seconds) in KV metadata. `expiresAt` is used by the retrieve endpoint to preserve the original TTL across failed verifier attempts (see below).
 
 **Response `200`:**
 ```json
 { "success": true }
 ```
 
-#### Programmatic usage (Node.js / Web Crypto)
+#### Programmatic usage (Node.js / browser)
 
-The server stores only ciphertext - **all encryption must happen client-side** before calling this endpoint. The passphrase never leaves the caller; it is embedded in the share URL fragment (`#passphrase`) which browsers never send to the server.
+The server stores only ciphertext — **all encryption must happen client-side** before calling this endpoint. The passphrase never leaves the caller; it is embedded in the share URL fragment (`#passphrase`) which browsers never send to the server.
+
+Key derivation uses **Argon2id** (OWASP 2023 minimum: m=19 MiB, t=2, p=1, 32-byte output). Both the AES-GCM encryption key and the server-side verifier are derived from the same passphrase with different salts (`id` and `id + "_v"` respectively). `hash-wasm` is the reference implementation the server ships; any Argon2id library with the same parameters will produce identical output.
 
 ```js
+import { argon2id } from 'hash-wasm'
+
 const BASE_URL = 'https://secret.example.com'
 const JWT     = 'eyJ...'   // Cf-Access-Jwt-Assertion from your CF Access service token
 
+const ARGON2_PARAMS = { parallelism: 1, iterations: 2, memorySize: 19456, hashLength: 32 }
+
+async function deriveBytes(passphrase, saltStr) {
+  const enc = new TextEncoder()
+  return argon2id({
+    password: enc.encode(passphrase),
+    salt:     enc.encode(saltStr),
+    outputType: 'binary',
+    ...ARGON2_PARAMS,
+  })
+}
+
 async function pushSecret(plaintext, passphrase, ttlSeconds = 86400) {
-  const enc  = new TextEncoder()
-  const id   = crypto.randomUUID()
+  const enc = new TextEncoder()
+  const id  = crypto.randomUUID()
 
-  // Derive encryption key - PBKDF2 / SHA-256 / 100k iterations
-  const base = await crypto.subtle.importKey('raw', enc.encode(passphrase), 'PBKDF2', false, ['deriveKey'])
-  const key  = await crypto.subtle.deriveKey(
-    { name: 'PBKDF2', salt: enc.encode(id + '_k'), iterations: 100_000, hash: 'SHA-256' },
-    base, { name: 'AES-GCM', length: 256 }, false, ['encrypt']
-  )
-
-  // Encrypt
-  const iv         = crypto.getRandomValues(new Uint8Array(12))
+  // Encryption key — Argon2id over (passphrase, id)
+  const keyBytes = await deriveBytes(passphrase, id)
+  const key = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-GCM', length: 256 }, false, ['encrypt'])
+  const iv = crypto.getRandomValues(new Uint8Array(12))
   const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, enc.encode(plaintext))
   const encryptedData = JSON.stringify({
     iv: btoa(String.fromCharCode(...iv)),
     d:  btoa(String.fromCharCode(...new Uint8Array(ciphertext))),
   })
 
-  // Derive verifier - separate PBKDF2 / 50k iterations / salt = id + "_v"
-  const vBase    = await crypto.subtle.importKey('raw', enc.encode(passphrase), 'PBKDF2', false, ['deriveBits'])
-  const vBits    = await crypto.subtle.deriveBits(
-    { name: 'PBKDF2', salt: enc.encode(id + '_v'), iterations: 50_000, hash: 'SHA-256' },
-    vBase, 256
-  )
-  const verifier = btoa(String.fromCharCode(...new Uint8Array(vBits)))
+  // Verifier — Argon2id over (passphrase, id + "_v")
+  const vBytes   = await deriveBytes(passphrase, id + '_v')
+  const verifier = btoa(String.fromCharCode(...vBytes))
 
-  // Store
   await fetch(`${BASE_URL}/api/v1/admin/secrets`, {
     method:  'POST',
     headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': JWT },
-    body:    JSON.stringify({ id, encryptedData, verifier, ttl: ttlSeconds }),
+    body:    JSON.stringify({ id, encryptedData, verifier, ttl: ttlSeconds, algoVersion: 'argon2id-v1' }),
   })
 
-  // Share link - passphrase in fragment, never sent to server
   return `${BASE_URL}/receive/${id}#${passphrase}`
 }
 ```
@@ -113,10 +122,22 @@ Initiate a multipart upload. Returns the R2 `uploadId` and `key`.
 { "key": "uuid", "uploadId": "r2-upload-id", "fileId": "uuid" }
 ```
 
-**Response `507`** - storage limit exceeded:
+**Response `400`** — `size` missing, non-numeric, non-finite, or ≤ 0:
+```json
+{ "error": "INVALID_SIZE" }
+```
+
+**Response `413`** — single file exceeds the configured per-file cap (`ui:max_upload_bytes`, default 9 GiB):
+```json
+{ "error": "UPLOAD_LIMIT" }
+```
+
+**Response `507`** — would exceed the total-storage cap (`ui:max_storage_bytes`, default 9.5 GiB):
 ```json
 { "error": "STORAGE_LIMIT" }
 ```
+
+Both caps are admin-controlled via `POST /api/v1/admin/ui/limits` (see below). The server is authoritative — the client's own pre-flight check on `file.size` is UX-only.
 
 ---
 
@@ -159,13 +180,17 @@ Finalize a multipart upload and mark the file as `ready` in D1.
 ### Stats
 
 #### `GET /api/v1/admin/stats`
-Return storage usage and list of active files.
+Return storage usage, current limits, and list of active files.
+
+- `limit` — effective total-storage cap (bytes). Reads `ui:max_storage_bytes` from KV, falls back to the built-in default (9.5 GiB) when unset.
+- `maxUpload` — effective per-file cap (bytes). Reads `ui:max_upload_bytes` from KV, falls back to 9 GiB.
 
 **Response `200`:**
 ```json
 {
   "used": 10485760,
-  "limit": 9663676416,
+  "limit": 10200547328,
+  "maxUpload": 9663676416,
   "files": [
     {
       "id": "uuid",
@@ -257,6 +282,35 @@ All fields are optional. Set `siteKey` to `null` to remove it.
 
 ---
 
+#### `POST /api/v1/admin/ui/limits`
+Update the storage caps used by `/api/v1/admin/files/init` and surfaced on `/api/v1/admin/stats` + `/ui/config`. Values are provided in GB (binary: 1 GB = 1024³ bytes) and stored in KV as exact byte counts.
+
+**Request body (JSON):**
+```json
+{
+  "maxStorageGb": 9.5,
+  "maxUploadGb": 9
+}
+```
+
+**Validation:**
+- Both fields are required, must be finite positive numbers.
+- Each is capped at **50 GB** server-side — a deliberate safety rail against a typo silently opening a large R2 bill. Raise this in code if you genuinely need more.
+- `maxUploadGb` must not exceed `maxStorageGb`.
+- The admin UI additionally gates anything above the 10 GiB Cloudflare R2 free tier behind an `OKAY` typed-confirmation modal (uppercase, English, identical across all locales).
+
+**Response `200`:**
+```json
+{ "ok": true }
+```
+
+**Response `400`** — one of the validation rules above failed:
+```json
+{ "error": "Value too large (max 50 GB)" }
+```
+
+---
+
 #### `POST /api/v1/admin/ui/logo`
 Upload the brand logo. Body is the raw image binary.
 
@@ -306,22 +360,22 @@ Retrieve and burn an encrypted secret. Verifier is checked before returning ciph
 { "encryptedData": "base64-json-blob" }
 ```
 
-**Response `403`** - wrong verifier (attempts remaining):
+**Response `403`** — wrong verifier (attempts remaining). The secret's original expiration is preserved across failed attempts — a bad guess increments `attempts` in KV metadata but does **not** slide the TTL forward.
 ```json
 { "error": "RETRY_2" }
 ```
 
-**Response `403`** - Turnstile challenge failed:
+**Response `403`** — Turnstile challenge failed:
 ```json
 { "error": "CHALLENGE_FAILED" }
 ```
 
-**Response `410`** - max attempts exceeded, secret deleted:
+**Response `410`** — secret deleted. Either the 3-attempt limit was hit, or a bad attempt arrived with < 60 s of TTL remaining (KV's minimum `expirationTtl`) and the server chose to burn the record rather than extend it.
 ```json
 { "error": "TERMINATED" }
 ```
 
-**Response `404`** - secret not found or expired:
+**Response `404`** — secret not found or expired:
 ```json
 { "error": "Link wygasł, lub klucz jest nieprawidłowy" }
 ```
@@ -352,9 +406,10 @@ These routes are HTML pages or static assets and must remain outside CF Access:
 | `GET` | `/share/:id` | File download / Turnstile gate |
 | `POST` | `/share/:id` | File download form submission (Turnstile + password) |
 | `GET` | `/s/:id` | Short-link redirect |
-| `GET` | `/ui/config` | Global UI settings (JSON) |
+| `GET` | `/ui/config` | Global UI settings — accent, bg, brand, tagline, Turnstile flags, and current storage caps (`maxStorageGb`, `maxUploadGb`, `freeTierGb`) |
 | `GET` | `/ui/logo` | Brand logo from R2 |
 | `GET` | `/ui/qr` | Server-rendered SVG QR code (`?d=encodedUrl`) |
+| `GET` | `/ui/argon2.v1.js` | Bundled hash-wasm Argon2id module. `immutable` cached; same-origin delivery so no external CDN enters the CSP. Bump the version suffix (`v1` → `v2`) when swapping implementations |
 
 ---
 
@@ -369,9 +424,10 @@ HTTP status codes used:
 | Code | Meaning |
 |------|---------|
 | 200 | Success |
-| 400 | Bad request (missing/invalid params) |
+| 400 | Bad request (missing/invalid params, `INVALID_SIZE`) |
 | 401 | Unauthorized (missing or invalid CF Access JWT) |
 | 403 | Forbidden (wrong verifier, Turnstile failed) |
 | 404 | Not found |
-| 410 | Gone (expired or burned) |
-| 507 | Insufficient storage |
+| 410 | Gone (expired, burned, or `TERMINATED`) |
+| 413 | Payload too large (`UPLOAD_LIMIT` — single file exceeds per-file cap) |
+| 507 | Insufficient storage (`STORAGE_LIMIT` — total cap exceeded) |

@@ -13,14 +13,14 @@ Secure, one-time sharing of passwords, files and links - built on Cloudflare Wor
 
 | Feature | Details |
 |---|---|
-| **Text secrets** | Zero-knowledge credential sharing - AES-256-GCM, passphrase in URL hash, burn-on-read |
-| **File sharing** | Up to 5 GB via R2, optional password, download limit, server-enforced TTL |
-| **URL shortener** | Short links with TTL and click limit, SSRF-safe |
-| **Appearance editor** | Accent colour, background colour, brand name, tagline, logo - all globally persistent |
+| **Text secrets** | Zero-knowledge credential sharing - AES-256-GCM, Argon2id key derivation (OWASP 2023), passphrase in URL hash, burn-on-read |
+| **File sharing** | R2-backed, per-file and total caps admin-configurable in Appearance (defaults 9 GB / 9.5 GB, hard ceiling 50 GB), optional password, download limit, server-enforced TTL |
+| **URL shortener** | Short links with TTL and click limit, SSRF-safe, unbiased ID generation |
+| **Appearance editor** | Accent colour, background colour, brand name, tagline, logo, storage limits - all globally persistent |
 | **Dark / light mode** | System-detected per client, manually overridable |
 | **QR codes** | Server-rendered SVG QR on every output link - scan directly from desktop |
 | **CF Access** | All write/admin endpoints protected by Cloudflare Access + RS256 JWT verification |
-| **Internationalisation** | 8 languages, auto-detected per user, flag picker in the UI |
+| **Internationalisation** | 9 languages, auto-detected per user, flag picker in the UI |
 | **REST API** | Versioned `/api/v1/` - admin zone (`/api/v1/admin/*`) protected by CF Access, public zone (`/api/v1/public/*`) open; full docs in [docs/api.md](docs/api.md) |
 
 > **$0 to run.** The entire stack - Workers, KV, D1, R2, and Cloudflare Access (up to 50 users) - runs on Cloudflare's free tier. No credit card required, no infrastructure to manage. You only start paying if you exceed the free-tier request limits, which for a self-hosted internal tool is unlikely.
@@ -144,6 +144,7 @@ flowchart LR
 - Server-enforced TTL - maximum 7 days regardless of what the client sends
 - Automatic deletion on expiry (hourly cron)
 - Lockout after 3 failed password attempts → file deleted immediately
+- Per-file and total storage caps admin-configurable (defaults 9 GB / 9.5 GB, hard ceiling 50 GB per value) — any value above the 10 GiB Cloudflare R2 free tier requires typing `OKAY` to confirm in the Appearance panel
 
 #### Global Pepper
 
@@ -166,6 +167,7 @@ The Worker refuses to start if `PEPPER` is not set (`bindings guard`).
 |---|---|
 | **Burn-on-read** | Secret deleted from KV on first successful retrieval |
 | **Rate limiting** | Max 3 attempts; permanent deletion on lockout (secrets & files) |
+| **TTL preservation** | Failed verifier attempts bump the counter but preserve the secret's original expiration — an attacker cannot keep a short-TTL record alive indefinitely by stopping before the 3rd attempt. Secrets with <60 s remaining are burned instead of refreshed |
 | **Global Pepper** | File password hashes include a server-side secret; D1 leak doesn't compromise passwords |
 | **Server-side TTL cap** | Backend enforces maximum lifetime; client cannot exceed it |
 | **CF Access + JWT verification** | Protected endpoints guarded at two layers: Cloudflare Access policy + in-Worker RS256 JWT verification against JWKS endpoint (cached 1 h) |
@@ -193,9 +195,9 @@ flowchart TD
 
 | Resource | Usage |
 |---|---|
-| **KV** (`SECRETS_STORE`) | Encrypted text secrets + verifier, short links, global UI config (accent, bg, brand, tagline) |
+| **KV** (`SECRETS_STORE`) | Encrypted text secrets + verifier + `algoVersion` + `expiresAt`, short links, global UI config (accent, bg, brand, tagline, storage caps, Turnstile flags) |
 | **D1** (`DB`) | File metadata (name, size, TTL, download count, password hash) |
-| **R2** (`BUCKET`) | Raw file data (multipart upload up to 5 GB) + logo image |
+| **R2** (`BUCKET`) | Raw file data (multipart upload, per-file cap admin-configurable up to 50 GB) + logo image |
 
 ---
 
@@ -226,6 +228,7 @@ API endpoints are grouped under `/api/v1/` in two zones. Cloudflare Access needs
 | `POST` | `/api/v1/admin/links` | Create short link (TTL + click limit) |
 | `POST` | `/api/v1/admin/ui/config` | Update global UI settings |
 | `POST` | `/api/v1/admin/ui/turnstile` | Update Turnstile settings |
+| `POST` | `/api/v1/admin/ui/limits` | Update storage / per-file upload caps (GB) |
 | `POST` | `/api/v1/admin/ui/logo` | Upload logo (PNG/SVG/WebP, max 256 KB) |
 | `DELETE` | `/api/v1/admin/ui/logo` | Remove logo |
 

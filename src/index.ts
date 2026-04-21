@@ -62,6 +62,10 @@ interface SecretMetadata {
   verifier: string
   attempts: number
   algoVersion?: AlgoVersion
+  // Absolute expiration (epoch seconds). Optional for backward compatibility
+  // with secrets written before this field was introduced — those fall back
+  // to the previous TTL-extending behavior until they expire naturally.
+  expiresAt?: number
 }
 
 interface LinkMetadata {
@@ -616,12 +620,16 @@ app.post('/api/v1/admin/secrets', async (c) => {
   // unsupported scheme.
   const algoVersion: AlgoVersion =
     body.algoVersion === 'argon2id-v1' ? body.algoVersion : CURRENT_ALGO
+  const ttlSec = Math.min(
+    parseInt(String(body.ttl)) || CONFIG.defaultTtl,
+    CONFIG.maxTtl
+  )
+  // Record the absolute expiration so metadata updates on retry (bad verifier
+  // path) can preserve the original lifetime instead of sliding it forward.
+  const expiresAt = Math.floor(Date.now() / 1000) + ttlSec
   await c.env.SECRETS_STORE.put(body.id, body.encryptedData, {
-    expirationTtl: Math.min(
-      parseInt(String(body.ttl)) || CONFIG.defaultTtl,
-      CONFIG.maxTtl
-    ),
-    metadata: { verifier: body.verifier, attempts: 0, algoVersion } satisfies SecretMetadata,
+    expirationTtl: ttlSec,
+    metadata: { verifier: body.verifier, attempts: 0, algoVersion, expiresAt } satisfies SecretMetadata,
   })
   return c.json({ success: true })
 })
@@ -652,10 +660,33 @@ app.post('/api/v1/public/secrets/:id/retrieve', async (c) => {
       await c.env.SECRETS_STORE.delete(id)
       return c.json({ error: 'TERMINATED' }, 410)
     }
-    await c.env.SECRETS_STORE.put(id, value, {
-      metadata: { ...metadata, attempts } satisfies SecretMetadata,
-      expirationTtl: CONFIG.defaultTtl,
-    })
+    // Preserve the secret's original expiration when bumping the attempt
+    // counter — previously we blindly reset to CONFIG.defaultTtl on every
+    // failed attempt, so an attacker could keep a short-TTL secret alive
+    // indefinitely by stopping at attempt 2 and resetting the clock.
+    let putOpts: KVNamespacePutOptions
+    if (metadata.expiresAt) {
+      const remaining = metadata.expiresAt - Math.floor(Date.now() / 1000)
+      // KV requires expirationTtl ≥ 60 s; if less remains, burn the secret
+      // instead of stretching the window.
+      if (remaining < 60) {
+        await c.env.SECRETS_STORE.delete(id)
+        return c.json({ error: 'TERMINATED' }, 410)
+      }
+      putOpts = {
+        metadata: { ...metadata, attempts } satisfies SecretMetadata,
+        expirationTtl: remaining,
+      }
+    } else {
+      // Legacy record without expiresAt — fall back to the old behavior.
+      // Harmless: legacy records created before this deploy expire within
+      // CONFIG.maxTtl (7 days) and will migrate to the new path on their own.
+      putOpts = {
+        metadata: { ...metadata, attempts } satisfies SecretMetadata,
+        expirationTtl: CONFIG.defaultTtl,
+      }
+    }
+    await c.env.SECRETS_STORE.put(id, value, putOpts)
     return c.json({ error: `RETRY_${CONFIG.maxAttempts - attempts}` }, 403)
   }
   await c.env.SECRETS_STORE.delete(id)
