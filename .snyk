@@ -1,0 +1,15 @@
+# Snyk (https://snyk.io) policy file
+version: v1.25.0
+
+# Snyk Code: exclude paths from SAST analysis.
+# Rationale: src/i18n.ts is a pure translation dictionary. Snyk's
+# HardcodedNonCryptoSecret rule fires on property keys like
+# `label_secret` / `placeholder_secret` — these are UI identifier
+# names, not secret values. 15 confirmed false positives as of
+# 2026-04-21.
+exclude:
+  code:
+    - src/i18n.ts
+
+# Snyk Open Source ignores (currently empty).
+ignore: {}
