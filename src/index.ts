@@ -143,10 +143,20 @@ function safeCompare(a: string, b: string): boolean {
 
 function generateShortId(length = 7): string {
   const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
-  const bytes = crypto.getRandomValues(new Uint8Array(length))
-  return Array.from(bytes)
-    .map((b) => chars[b % chars.length])
-    .join('')
+  // Rejection sampling so the byte → character mapping is unbiased. `b % 62`
+  // on a raw byte value (0..255) would over-represent the first 8 chars by
+  // ~25%; we reject any byte ≥ 248 (256 - 256 % 62) and draw more bytes if
+  // the batch is exhausted. Practically finishes in one iteration — we
+  // oversample 2× and accept on average ~97% of the batch.
+  const threshold = 256 - (256 % chars.length)
+  const out: string[] = []
+  while (out.length < length) {
+    const buf = crypto.getRandomValues(new Uint8Array(length * 2))
+    for (const b of buf) {
+      if (b < threshold && out.length < length) out.push(chars[b % chars.length])
+    }
+  }
+  return out.join('')
 }
 
 function isValidRedirectUrl(raw: string): boolean {
