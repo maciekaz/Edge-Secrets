@@ -8,11 +8,19 @@ import ARGON2_UMD_JS from 'hash-wasm/dist/argon2.umd.min.js'
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
+const GiB = 1024 * 1024 * 1024
+
 const CONFIG = {
   maxTtl: 604800,
   defaultTtl: 86400,
   maxAttempts: 3,
-  maxStorage: 9 * 1024 * 1024 * 1024,
+  // Default storage caps. Admin can override both via `/api/v1/admin/ui/limits`
+  // (values persisted in KV). Kept deliberately under CF R2 free tier (10 GiB).
+  maxStorage: Math.round(9.5 * GiB),
+  maxUpload: 9 * GiB,
+  // Cloudflare R2 free tier. Crossing this requires an admin OKAY
+  // confirmation in the UI and may incur costs.
+  freeTierBytes: 10 * GiB,
   visualTtl: 300,
 } as const
 
@@ -107,6 +115,22 @@ function escapeHtml(unsafe: unknown): unknown {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;')
+}
+
+// Resolve effective storage caps — KV-stored overrides fall back to CONFIG
+// defaults when absent or malformed. Used by the stats endpoint and by
+// /api/v1/admin/files/init to enforce both per-file and total caps.
+async function getStorageLimits(env: Bindings): Promise<{ maxStorage: number; maxUpload: number }> {
+  const [s, u] = await Promise.all([
+    env.SECRETS_STORE.get('ui:max_storage_bytes'),
+    env.SECRETS_STORE.get('ui:max_upload_bytes'),
+  ])
+  const ps = s ? parseInt(s, 10) : NaN
+  const pu = u ? parseInt(u, 10) : NaN
+  return {
+    maxStorage: Number.isFinite(ps) && ps > 0 ? ps : CONFIG.maxStorage,
+    maxUpload: Number.isFinite(pu) && pu > 0 ? pu : CONFIG.maxUpload,
+  }
 }
 
 function safeCompare(a: string, b: string): boolean {
@@ -379,7 +403,7 @@ app.get('/ui/qr', (c) => {
 
 // Global UI config — public read, protected write
 app.get('/ui/config', async (c) => {
-  const [accent, bg, brand, tagline, tsSiteKey, tsCreds, tsFiles] = await Promise.all([
+  const [accent, bg, brand, tagline, tsSiteKey, tsCreds, tsFiles, limits] = await Promise.all([
     c.env.SECRETS_STORE.get('ui:accent'),
     c.env.SECRETS_STORE.get('ui:bg'),
     c.env.SECRETS_STORE.get('ui:brand'),
@@ -387,6 +411,7 @@ app.get('/ui/config', async (c) => {
     c.env.SECRETS_STORE.get('ui:turnstile_site_key'),
     c.env.SECRETS_STORE.get('ui:turnstile_creds'),
     c.env.SECRETS_STORE.get('ui:turnstile_files'),
+    getStorageLimits(c.env),
   ])
   return c.json({
     accent:  accent  ?? '#818cf8',
@@ -396,6 +421,9 @@ app.get('/ui/config', async (c) => {
     turnstileSiteKey: tsSiteKey ?? null,
     turnstileCreds:   tsCreds === '1',
     turnstileFiles:   tsFiles === '1',
+    maxStorageGb: limits.maxStorage / GiB,
+    maxUploadGb:  limits.maxUpload  / GiB,
+    freeTierGb:   CONFIG.freeTierBytes / GiB,
   })
 })
 
@@ -416,6 +444,33 @@ app.post('/api/v1/admin/ui/config', async (c) => {
     body.bg      ? c.env.SECRETS_STORE.put('ui:bg', body.bg)           : Promise.resolve(),
     body.brand   !== undefined ? (body.brand   ? c.env.SECRETS_STORE.put('ui:brand', body.brand)     : c.env.SECRETS_STORE.delete('ui:brand'))   : Promise.resolve(),
     body.tagline !== undefined ? (body.tagline ? c.env.SECRETS_STORE.put('ui:tagline', body.tagline) : c.env.SECRETS_STORE.delete('ui:tagline')) : Promise.resolve(),
+  ])
+  return c.json({ ok: true })
+})
+
+// Storage limits — admin-controlled caps for total storage and per-file
+// upload size, both in GB (binary). Admin UI gates values above the CF R2
+// free tier behind an OKAY confirmation; this endpoint stores whatever the
+// admin sends within sane bounds (0 < x ≤ 500 GB, upload ≤ storage).
+app.post('/api/v1/admin/ui/limits', async (c) => {
+  const body = await c.req.json<{ maxStorageGb?: number; maxUploadGb?: number }>()
+  const isPos = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0
+  if (!isPos(body.maxStorageGb)) return c.json({ error: 'Invalid maxStorageGb' }, 400)
+  if (!isPos(body.maxUploadGb)) return c.json({ error: 'Invalid maxUploadGb' }, 400)
+  // Hard ceiling of 50 GB per value — deliberate safety rail against typos
+  // that would silently open a large R2 bill; values above this must be
+  // changed in code by the operator.
+  if (body.maxStorageGb > 50 || body.maxUploadGb > 50) {
+    return c.json({ error: 'Value too large (max 50 GB)' }, 400)
+  }
+  if (body.maxUploadGb > body.maxStorageGb) {
+    return c.json({ error: 'maxUploadGb must not exceed maxStorageGb' }, 400)
+  }
+  const storageBytes = Math.round(body.maxStorageGb * GiB)
+  const uploadBytes = Math.round(body.maxUploadGb * GiB)
+  await Promise.all([
+    c.env.SECRETS_STORE.put('ui:max_storage_bytes', String(storageBytes)),
+    c.env.SECRETS_STORE.put('ui:max_upload_bytes', String(uploadBytes)),
   ])
   return c.json({ ok: true })
 })
@@ -599,22 +654,33 @@ app.post('/api/v1/public/secrets/:id/retrieve', async (c) => {
 
 // Storage stats + file list
 app.get('/api/v1/admin/stats', async (c) => {
-  const s = await c.env.DB.prepare(
-    'SELECT SUM(size) as used FROM files WHERE status!="downloaded"'
-  ).first<{ used: number }>()
-  const f = await c.env.DB.prepare(
-    'SELECT * FROM files WHERE status!="downloaded" ORDER BY created_at DESC'
-  ).all<FileRecord>()
-  return c.json({ used: s?.used ?? 0, limit: CONFIG.maxStorage, files: f.results })
+  const [s, f, limits] = await Promise.all([
+    c.env.DB.prepare('SELECT SUM(size) as used FROM files WHERE status!="downloaded"').first<{ used: number }>(),
+    c.env.DB.prepare('SELECT * FROM files WHERE status!="downloaded" ORDER BY created_at DESC').all<FileRecord>(),
+    getStorageLimits(c.env),
+  ])
+  return c.json({
+    used: s?.used ?? 0,
+    limit: limits.maxStorage,
+    maxUpload: limits.maxUpload,
+    files: f.results,
+  })
 })
 
 // Initiate multipart upload
 app.post('/api/v1/admin/files/init', async (c) => {
   const { filename, size, password, ttl, limit } = await c.req.json<UploadInitBody>()
+  const { maxStorage, maxUpload } = await getStorageLimits(c.env)
+  if (typeof size !== 'number' || !Number.isFinite(size) || size <= 0) {
+    return c.json({ error: 'INVALID_SIZE' }, 400)
+  }
+  if (size > maxUpload) {
+    return c.json({ error: 'UPLOAD_LIMIT' }, 413)
+  }
   const s = await c.env.DB.prepare(
     'SELECT SUM(size) as t FROM files WHERE status!="downloaded"'
   ).first<{ t: number }>()
-  if ((s?.t ?? 0) + size > CONFIG.maxStorage) {
+  if ((s?.t ?? 0) + size > maxStorage) {
     return c.json({ error: 'STORAGE_LIMIT' }, 507)
   }
   const safeTtl = Math.min(ttl ?? 172_800_000, CONFIG.maxTtl * 1000)
@@ -1023,13 +1089,46 @@ function saveConfig(){
     var sk=(get('cfgTsSiteKey')||{value:''}).value.trim();
     var tsCreds=!!(get('cfgTsCreds')||{}).checked;
     var tsFiles=!!(get('cfgTsFiles')||{}).checked;
+    var mStorage=parseFloat((get('cfgMaxStorage')||{value:'9.5'}).value);
+    var mUpload=parseFloat((get('cfgMaxUpload')||{value:'9'}).value);
+    if(!isFinite(mStorage)||mStorage<=0||!isFinite(mUpload)||mUpload<=0){
+        modal(window.L.js_error,window.L.cfg_limits_invalid);return;
+    }
+    if(mUpload>mStorage){
+        modal(window.L.js_error,window.L.cfg_limits_upload_gt_storage);return;
+    }
+    var free=(window.__limits&&window.__limits.freeTierGb)||10;
+    var needsOkay=(mStorage>free||mUpload>free);
+    var go=function(){_saveAllConfig(accent,bg,brand,tagline,sk,tsCreds,tsFiles,mStorage,mUpload);};
+    if(needsOkay){_openOkayGate(go);return;}
+    go();
+}
+
+function _saveAllConfig(accent,bg,brand,tagline,sk,tsCreds,tsFiles,mStorage,mUpload){
     var btn=get('cfgSave');if(btn){btn.disabled=true;btn.textContent='...';}
     Promise.all([
         fetch('/api/v1/admin/ui/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({accent:accent,bg:bg,brand:brand||null,tagline:tagline||null})}),
-        fetch('/api/v1/admin/ui/turnstile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({siteKey:sk||null,creds:tsCreds,files:tsFiles})})
+        fetch('/api/v1/admin/ui/turnstile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({siteKey:sk||null,creds:tsCreds,files:tsFiles})}),
+        fetch('/api/v1/admin/ui/limits',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({maxStorageGb:mStorage,maxUploadGb:mUpload})})
     ])
-        .then(function(){if(btn){btn.textContent=window.L.js_saved;btn.classList.add('saved');setTimeout(function(){btn.textContent=window.L.js_save;btn.classList.remove('saved');btn.disabled=false;},2000);}})
+        .then(function(rs){return Promise.all(rs.map(function(r){if(!r.ok)return r.json().then(function(e){throw new Error((e&&e.error)||'save failed');});return r.json();}));})
+        .then(function(){
+            window.__limits={maxUploadBytes:mUpload*1024*1024*1024,freeTierGb:(window.__limits&&window.__limits.freeTierGb)||10};
+            if(btn){btn.textContent=window.L.js_saved;btn.classList.add('saved');setTimeout(function(){btn.textContent=window.L.js_save;btn.classList.remove('saved');btn.disabled=false;},2000);}
+        })
         .catch(function(){if(btn){btn.textContent=window.L.js_error;btn.disabled=false;setTimeout(function(){btn.textContent=window.L.js_save;},2000);}});
+}
+
+function _openOkayGate(onConfirm){
+    var ov=get('okayOv'),input=get('okayInput'),err=get('okayErr');
+    if(!ov||!input)return;
+    input.value='';err.style.display='none';
+    ov.style.display='flex';setTimeout(function(){input.focus();},50);
+    get('okayConfirmBtn').onclick=function(){
+        if(input.value==='OKAY'){ov.style.display='none';onConfirm();}
+        else{err.style.display='block';}
+    };
+    get('okayCancelBtn').onclick=function(){ov.style.display='none';};
 }
 function uploadLogo(){
     var input=get('logoInput');if(!input||!input.files.length)return;var file=input.files[0];
@@ -1081,6 +1180,12 @@ async function shorten(){
         var tsk=get('cfgTsSiteKey');if(tsk&&cfg.turnstileSiteKey)tsk.value=cfg.turnstileSiteKey;
         var tc=get('cfgTsCreds');if(tc)tc.checked=!!cfg.turnstileCreds;
         var tf=get('cfgTsFiles');if(tf)tf.checked=!!cfg.turnstileFiles;
+        var sGb=(typeof cfg.maxStorageGb==='number')?cfg.maxStorageGb:9.5;
+        var uGb=(typeof cfg.maxUploadGb==='number')?cfg.maxUploadGb:9;
+        var fGb=(typeof cfg.freeTierGb==='number')?cfg.freeTierGb:10;
+        window.__limits={maxUploadBytes:uGb*1024*1024*1024,freeTierGb:fGb};
+        var ms=get('cfgMaxStorage');if(ms)ms.value=sGb;
+        var mu=get('cfgMaxUpload');if(mu)mu.value=uGb;
     }).catch(function(){});
     var bh=document.querySelector('.brand-header');
     if(bh){
@@ -1178,6 +1283,11 @@ const CONCURRENCY = 4;
 async function upl() {
     const f = get('f').files[0];
     if (!f) return modal(window.L.js_info, window.L.js_select_file);
+    // Client-side pre-flight against the configured per-file cap. Server
+    // re-checks at /api/v1/admin/files/init — this is just faster UX feedback.
+    if (window.__limits && f.size > window.__limits.maxUploadBytes) {
+        return modal(window.L.js_error, window.L.js_file_too_large);
+    }
     setL(get('btnF'), 1);
     const m = get('fmsg');
     m.innerText = window.L.js_initializing;
@@ -1233,7 +1343,8 @@ async function loadS() {
         const p = (d.used / d.limit) * 100;
         get('bar').style.width = p + '%';
         if (p > 90) get('bar').style.background = 'var(--danger)';
-        get('st_txt').innerText = window.L.js_used + (d.used / 1e9).toFixed(2) + ' GB / 9.00 GB';
+        const GiB = 1024 * 1024 * 1024;
+        get('st_txt').innerText = window.L.js_used + (d.used / GiB).toFixed(2) + ' GB / ' + (d.limit / GiB).toFixed(2) + ' GB';
         get('tbl').innerHTML = d.files.map(f => {
             const lim = f.max_downloads === -1 ? '\u221e' : f.max_downloads;
             return '<tr><td>' + escapeHtml(f.filename) + '</td><td>' + (f.size / 1e6).toFixed(1) + 'MB</td><td style="color:var(--text-muted)">' + window.L.js_downloads + f.download_count + '/' + lim + '</td><td style="text-align:right"><button class="btn-del" onclick="del(\\'' + f.id + '\\')">' + window.L.js_btn_delete + '</button></td></tr>';
@@ -1484,7 +1595,32 @@ function renderGen(type: string, t: Translations, langCode: LangCode): string {
       </div>
     </div>
     <div class="cfg-divider"></div>
+    <div class="cfg-section">
+      <div class="cfg-section-label">${t.cfg_limits_title}</div>
+      <div class="cfg-row" style="margin-bottom:8px">
+        <span class="cfg-label">${t.cfg_max_storage}</span>
+        <input type="number" class="cfg-input" id="cfgMaxStorage" step="0.5" min="0.1" max="50" placeholder="9.5" style="max-width:80px">
+      </div>
+      <div class="cfg-row">
+        <span class="cfg-label">${t.cfg_max_upload}</span>
+        <input type="number" class="cfg-input" id="cfgMaxUpload" step="0.5" min="0.1" max="50" placeholder="9" style="max-width:80px">
+      </div>
+      <div style="margin-top:8px;font-size:0.6rem;color:var(--text-muted);line-height:1.5">${t.cfg_limits_hint}</div>
+    </div>
+    <div class="cfg-divider"></div>
     <button class="cfg-save" id="cfgSave" onclick="saveConfig()">${t.js_save}</button>
+  </div>
+  <div class="overlay" id="okayOv" onclick="if(event.target===this)this.style.display='none'" style="display:none">
+    <div class="modal">
+      <h3>${t.cfg_free_warning_title}</h3>
+      <p style="margin-bottom:14px;line-height:1.5">${t.cfg_free_warning_body}</p>
+      <input type="text" id="okayInput" class="cfg-input" placeholder="OKAY" autocomplete="off" autocapitalize="characters" spellcheck="false" style="width:100%;margin-bottom:8px;text-align:center;letter-spacing:0.2em">
+      <p id="okayErr" style="display:none;color:var(--danger);font-size:0.7rem;margin-bottom:10px">${t.cfg_okay_mismatch}</p>
+      <div style="display:flex;gap:8px">
+        <button class="modal-btn" id="okayConfirmBtn" style="flex:1">${t.cfg_btn_confirm}</button>
+        <button class="modal-btn" id="okayCancelBtn" style="flex:1;background:var(--surface-3);color:var(--text)">${t.cfg_btn_cancel}</button>
+      </div>
+    </div>
   </div>`
   return BASE_HTML(body, langCode, lp)
 }

@@ -120,6 +120,20 @@ export interface Translations {
   cfg_turnstile_creds: string
   cfg_turnstile_files: string
   ts_verify: string
+
+  // ── Storage limits (configurable in Appearance) ──
+  cfg_limits_title: string
+  cfg_max_storage: string
+  cfg_max_upload: string
+  cfg_limits_hint: string
+  cfg_limits_invalid: string
+  cfg_limits_upload_gt_storage: string
+  cfg_free_warning_title: string
+  cfg_free_warning_body: string
+  cfg_okay_mismatch: string
+  cfg_btn_confirm: string
+  cfg_btn_cancel: string
+  js_file_too_large: string
 }
 
 // ── Translations ────────────────────────────────────────────────────────────
@@ -141,7 +155,7 @@ export const I18N: Record<LangCode, Translations> = {
     btn_unlock: 'UNLOCK & DOWNLOAD',
 
     tab_creds: 'CREDENTIALS',
-    tab_files: 'FILES (5GB)',
+    tab_files: 'FILES',
     tab_links: 'LINKS',
 
     label_secret: 'SECRET CONTENT',
@@ -233,6 +247,19 @@ export const I18N: Record<LangCode, Translations> = {
     cfg_turnstile_creds: 'Protect secret retrieval',
     cfg_turnstile_files: 'Protect file downloads',
     ts_verify: 'SECURITY CHECK',
+
+    cfg_limits_title: 'STORAGE LIMITS',
+    cfg_max_storage: 'TOTAL STORAGE (GB)',
+    cfg_max_upload: 'MAX PER FILE (GB)',
+    cfg_limits_hint: 'Cloudflare R2 free tier is 10 GB. Going beyond requires confirmation and may incur costs.',
+    cfg_limits_invalid: 'Limit values must be positive numbers.',
+    cfg_limits_upload_gt_storage: 'Per-file limit cannot exceed total storage.',
+    cfg_free_warning_title: 'EXCEEDING FREE TIER',
+    cfg_free_warning_body: 'The values you entered go beyond the Cloudflare R2 free tier (10 GB) and may incur storage costs. Type OKAY (uppercase) to confirm:',
+    cfg_okay_mismatch: 'You must type OKAY exactly (uppercase).',
+    cfg_btn_confirm: 'CONFIRM',
+    cfg_btn_cancel: 'CANCEL',
+    js_file_too_large: 'File exceeds the configured upload limit.',
   },
 
   // ────────────────────────── Polski ──────────────────────────
@@ -250,7 +277,7 @@ export const I18N: Record<LangCode, Translations> = {
     btn_unlock: 'ODBLOKUJ I POBIERZ',
 
     tab_creds: 'POŚWIADCZENIA',
-    tab_files: 'PLIKI (5GB)',
+    tab_files: 'PLIKI',
     tab_links: 'LINKI',
 
     label_secret: 'TREŚĆ SEKRETU',
@@ -342,6 +369,19 @@ export const I18N: Record<LangCode, Translations> = {
     cfg_turnstile_creds: 'Chroń odbiór secretów',
     cfg_turnstile_files: 'Chroń pobieranie plików',
     ts_verify: 'WERYFIKACJA BEZPIECZEŃSTWA',
+
+    cfg_limits_title: 'LIMITY POJEMNOŚCI',
+    cfg_max_storage: 'CAŁKOWITA POJEMNOŚĆ (GB)',
+    cfg_max_upload: 'MAKS. NA PLIK (GB)',
+    cfg_limits_hint: 'Darmowy plan Cloudflare R2 to 10 GB. Przekroczenie wymaga potwierdzenia i może skutkować kosztami.',
+    cfg_limits_invalid: 'Wartości limitów muszą być liczbami dodatnimi.',
+    cfg_limits_upload_gt_storage: 'Limit na plik nie może przekraczać całkowitej pojemności.',
+    cfg_free_warning_title: 'PRZEKROCZENIE PLANU FREE',
+    cfg_free_warning_body: 'Wpisane wartości przekraczają darmowy plan Cloudflare R2 (10 GB) i mogą skutkować kosztami przechowywania. Wpisz OKAY (wielkimi literami), aby potwierdzić:',
+    cfg_okay_mismatch: 'Musisz wpisać OKAY dokładnie (wielkie litery).',
+    cfg_btn_confirm: 'POTWIERDŹ',
+    cfg_btn_cancel: 'ANULUJ',
+    js_file_too_large: 'Plik przekracza skonfigurowany limit uploadu.',
   },
 
   // ────────────────────────── Deutsch ──────────────────────────
@@ -359,7 +399,7 @@ export const I18N: Record<LangCode, Translations> = {
     btn_unlock: 'ENTSPERREN & HERUNTERLADEN',
 
     tab_creds: 'ZUGANGSDATEN',
-    tab_files: 'DATEIEN (5GB)',
+    tab_files: 'DATEIEN',
     tab_links: 'LINKS',
 
     label_secret: 'GEHEIMER INHALT',
@@ -451,6 +491,19 @@ export const I18N: Record<LangCode, Translations> = {
     cfg_turnstile_creds: 'Secrets schützen',
     cfg_turnstile_files: 'Downloads schützen',
     ts_verify: 'SICHERHEITSCHECK',
+
+    cfg_limits_title: 'SPEICHERLIMITS',
+    cfg_max_storage: 'GESAMTSPEICHER (GB)',
+    cfg_max_upload: 'MAX PRO DATEI (GB)',
+    cfg_limits_hint: 'Cloudflare R2 Free-Tier beträgt 10 GB. Eine Überschreitung erfordert Bestätigung und kann Kosten verursachen.',
+    cfg_limits_invalid: 'Limit-Werte müssen positive Zahlen sein.',
+    cfg_limits_upload_gt_storage: 'Datei-Limit darf den Gesamtspeicher nicht überschreiten.',
+    cfg_free_warning_title: 'FREE-TIER ÜBERSCHRITTEN',
+    cfg_free_warning_body: 'Die eingegebenen Werte überschreiten den Cloudflare R2 Free-Tier (10 GB) und können Speicherkosten verursachen. Tippen Sie OKAY (Großbuchstaben) zur Bestätigung:',
+    cfg_okay_mismatch: 'Sie müssen OKAY exakt (Großbuchstaben) eingeben.',
+    cfg_btn_confirm: 'BESTÄTIGEN',
+    cfg_btn_cancel: 'ABBRECHEN',
+    js_file_too_large: 'Datei überschreitet das konfigurierte Upload-Limit.',
   },
 
   // ────────────────────────── Français ──────────────────────────
@@ -468,7 +521,7 @@ export const I18N: Record<LangCode, Translations> = {
     btn_unlock: 'DÉVERROUILLER ET TÉLÉCHARGER',
 
     tab_creds: 'IDENTIFIANTS',
-    tab_files: 'FICHIERS (5GO)',
+    tab_files: 'FICHIERS',
     tab_links: 'LIENS',
 
     label_secret: 'CONTENU SECRET',
@@ -560,6 +613,19 @@ export const I18N: Record<LangCode, Translations> = {
     cfg_turnstile_creds: 'Protéger la récupération',
     cfg_turnstile_files: 'Protéger les téléchargements',
     ts_verify: 'VÉRIFICATION DE SÉCURITÉ',
+
+    cfg_limits_title: 'LIMITES DE STOCKAGE',
+    cfg_max_storage: 'STOCKAGE TOTAL (GO)',
+    cfg_max_upload: 'MAX PAR FICHIER (GO)',
+    cfg_limits_hint: 'Le niveau gratuit de Cloudflare R2 est de 10 Go. Dépasser requiert une confirmation et peut engendrer des frais.',
+    cfg_limits_invalid: 'Les valeurs de limite doivent être des nombres positifs.',
+    cfg_limits_upload_gt_storage: 'La limite par fichier ne peut pas dépasser le stockage total.',
+    cfg_free_warning_title: 'DÉPASSEMENT DU NIVEAU GRATUIT',
+    cfg_free_warning_body: 'Les valeurs saisies dépassent le niveau gratuit Cloudflare R2 (10 Go) et peuvent engendrer des frais de stockage. Tapez OKAY (en majuscules) pour confirmer :',
+    cfg_okay_mismatch: 'Vous devez taper OKAY exactement (en majuscules).',
+    cfg_btn_confirm: 'CONFIRMER',
+    cfg_btn_cancel: 'ANNULER',
+    js_file_too_large: 'Le fichier dépasse la limite d\'upload configurée.',
   },
 
   // ────────────────────────── Español ──────────────────────────
@@ -577,7 +643,7 @@ export const I18N: Record<LangCode, Translations> = {
     btn_unlock: 'DESBLOQUEAR Y DESCARGAR',
 
     tab_creds: 'CREDENCIALES',
-    tab_files: 'ARCHIVOS (5GB)',
+    tab_files: 'ARCHIVOS',
     tab_links: 'ENLACES',
 
     label_secret: 'CONTENIDO SECRETO',
@@ -669,6 +735,19 @@ export const I18N: Record<LangCode, Translations> = {
     cfg_turnstile_creds: 'Proteger recuperación',
     cfg_turnstile_files: 'Proteger descargas',
     ts_verify: 'VERIFICACIÓN DE SEGURIDAD',
+
+    cfg_limits_title: 'LÍMITES DE ALMACENAMIENTO',
+    cfg_max_storage: 'ALMACENAMIENTO TOTAL (GB)',
+    cfg_max_upload: 'MÁX POR ARCHIVO (GB)',
+    cfg_limits_hint: 'El nivel gratuito de Cloudflare R2 es 10 GB. Excederlo requiere confirmación y puede generar costes.',
+    cfg_limits_invalid: 'Los valores de límite deben ser números positivos.',
+    cfg_limits_upload_gt_storage: 'El límite por archivo no puede exceder el almacenamiento total.',
+    cfg_free_warning_title: 'EXCEDIENDO EL NIVEL GRATUITO',
+    cfg_free_warning_body: 'Los valores introducidos exceden el nivel gratuito de Cloudflare R2 (10 GB) y pueden generar costes de almacenamiento. Escriba OKAY (mayúsculas) para confirmar:',
+    cfg_okay_mismatch: 'Debe escribir OKAY exactamente (mayúsculas).',
+    cfg_btn_confirm: 'CONFIRMAR',
+    cfg_btn_cancel: 'CANCELAR',
+    js_file_too_large: 'El archivo excede el límite de subida configurado.',
   },
 
   // ────────────────────────── Українська ──────────────────────────
@@ -686,7 +765,7 @@ export const I18N: Record<LangCode, Translations> = {
     btn_unlock: 'РОЗБЛОКУВАТИ І ЗАВАНТАЖИТИ',
 
     tab_creds: 'ОБЛІКОВІ ДАНІ',
-    tab_files: 'ФАЙЛИ (5ГБ)',
+    tab_files: 'ФАЙЛИ',
     tab_links: 'ПОСИЛАННЯ',
 
     label_secret: 'СЕКРЕТНИЙ ВМІСТ',
@@ -778,6 +857,19 @@ export const I18N: Record<LangCode, Translations> = {
     cfg_turnstile_creds: 'Захист отримання секретів',
     cfg_turnstile_files: 'Захист завантажень файлів',
     ts_verify: 'ПЕРЕВІРКА БЕЗПЕКИ',
+
+    cfg_limits_title: 'ЛІМІТИ СХОВИЩА',
+    cfg_max_storage: 'ЗАГАЛЬНЕ СХОВИЩЕ (ГБ)',
+    cfg_max_upload: 'МАКС. НА ФАЙЛ (ГБ)',
+    cfg_limits_hint: 'Безкоштовний тариф Cloudflare R2 - це 10 ГБ. Перевищення потребує підтвердження і може спричинити витрати.',
+    cfg_limits_invalid: 'Значення лімітів мають бути додатними числами.',
+    cfg_limits_upload_gt_storage: 'Ліміт на файл не може перевищувати загальне сховище.',
+    cfg_free_warning_title: 'ПЕРЕВИЩЕННЯ БЕЗКОШТОВНОГО ТАРИФУ',
+    cfg_free_warning_body: 'Введені значення перевищують безкоштовний тариф Cloudflare R2 (10 ГБ) і можуть спричинити витрати на зберігання. Введіть OKAY (великими літерами), щоб підтвердити:',
+    cfg_okay_mismatch: 'Потрібно ввести OKAY точно (великими літерами).',
+    cfg_btn_confirm: 'ПІДТВЕРДИТИ',
+    cfg_btn_cancel: 'СКАСУВАТИ',
+    js_file_too_large: 'Файл перевищує налаштований ліміт завантаження.',
   },
 
   // ────────────────────────── Português ──────────────────────────
@@ -795,7 +887,7 @@ export const I18N: Record<LangCode, Translations> = {
     btn_unlock: 'DESBLOQUEAR E BAIXAR',
 
     tab_creds: 'CREDENCIAIS',
-    tab_files: 'ARQUIVOS (5GB)',
+    tab_files: 'ARQUIVOS',
     tab_links: 'LINKS',
 
     label_secret: 'CONTEÚDO SECRETO',
@@ -887,6 +979,19 @@ export const I18N: Record<LangCode, Translations> = {
     cfg_turnstile_creds: 'Proteger recuperação',
     cfg_turnstile_files: 'Proteger downloads',
     ts_verify: 'VERIFICAÇÃO DE SEGURANÇA',
+
+    cfg_limits_title: 'LIMITES DE ARMAZENAMENTO',
+    cfg_max_storage: 'ARMAZENAMENTO TOTAL (GB)',
+    cfg_max_upload: 'MÁX POR ARQUIVO (GB)',
+    cfg_limits_hint: 'O nível gratuito do Cloudflare R2 é 10 GB. Excedê-lo requer confirmação e pode gerar custos.',
+    cfg_limits_invalid: 'Os valores de limite devem ser números positivos.',
+    cfg_limits_upload_gt_storage: 'O limite por arquivo não pode exceder o armazenamento total.',
+    cfg_free_warning_title: 'EXCEDENDO O NÍVEL GRATUITO',
+    cfg_free_warning_body: 'Os valores inseridos excedem o nível gratuito do Cloudflare R2 (10 GB) e podem gerar custos de armazenamento. Digite OKAY (maiúsculas) para confirmar:',
+    cfg_okay_mismatch: 'Você deve digitar OKAY exatamente (maiúsculas).',
+    cfg_btn_confirm: 'CONFIRMAR',
+    cfg_btn_cancel: 'CANCELAR',
+    js_file_too_large: 'O arquivo excede o limite de upload configurado.',
   },
 
   // ────────────────────────── 中文 (简体) ──────────────────────────
@@ -904,7 +1009,7 @@ export const I18N: Record<LangCode, Translations> = {
     btn_unlock: '\u89E3\u9501\u5E76\u4E0B\u8F7D',
 
     tab_creds: '\u51ED\u636E',
-    tab_files: '\u6587\u4EF6 (5GB)',
+    tab_files: '\u6587\u4EF6',
     tab_links: '\u94FE\u63A5',
 
     label_secret: '\u79D8\u5BC6\u5185\u5BB9',
@@ -996,6 +1101,19 @@ export const I18N: Record<LangCode, Translations> = {
     cfg_turnstile_creds: '\u4FDD\u62A4\u5BC6\u94A5\u83B7\u53D6',
     cfg_turnstile_files: '\u4FDD\u62A4\u6587\u4EF6\u4E0B\u8F7D',
     ts_verify: '\u5B89\u5168\u9A8C\u8BC1',
+
+    cfg_limits_title: '存储限制',
+    cfg_max_storage: '总存储 (GB)',
+    cfg_max_upload: '单文件最大 (GB)',
+    cfg_limits_hint: 'Cloudflare R2 免费套餐为 10 GB。超出需要确认，并可能产生费用。',
+    cfg_limits_invalid: '限制值必须为正数。',
+    cfg_limits_upload_gt_storage: '单文件限制不能超过总存储。',
+    cfg_free_warning_title: '超出免费套餐',
+    cfg_free_warning_body: '输入的值超过 Cloudflare R2 免费套餐（10 GB），可能产生存储费用。输入 OKAY（大写）以确认：',
+    cfg_okay_mismatch: '必须精确输入 OKAY（大写）。',
+    cfg_btn_confirm: '确认',
+    cfg_btn_cancel: '取消',
+    js_file_too_large: '文件超过已配置的上传限制。',
   },
 
   // ────────────────────────── Čeština ──────────────────────────
@@ -1013,7 +1131,7 @@ export const I18N: Record<LangCode, Translations> = {
     btn_unlock: 'ODEMKNOUT A STÁHNOUT',
 
     tab_creds: 'PŘIHLAŠOVACÍ ÚDAJE',
-    tab_files: 'SOUBORY (5GB)',
+    tab_files: 'SOUBORY',
     tab_links: 'ODKAZY',
 
     label_secret: 'TAJNÝ OBSAH',
@@ -1105,6 +1223,19 @@ export const I18N: Record<LangCode, Translations> = {
     cfg_turnstile_creds: 'Chránit načítání tajemství',
     cfg_turnstile_files: 'Chránit stahování souborů',
     ts_verify: 'BEZPEČNOSTNÍ KONTROLA',
+
+    cfg_limits_title: 'LIMITY ÚLOŽIŠTĚ',
+    cfg_max_storage: 'CELKOVÉ ÚLOŽIŠTĚ (GB)',
+    cfg_max_upload: 'MAX. NA SOUBOR (GB)',
+    cfg_limits_hint: 'Bezplatný plán Cloudflare R2 je 10 GB. Překročení vyžaduje potvrzení a může vést k nákladům.',
+    cfg_limits_invalid: 'Hodnoty limitů musí být kladná čísla.',
+    cfg_limits_upload_gt_storage: 'Limit na soubor nemůže překročit celkové úložiště.',
+    cfg_free_warning_title: 'PŘEKROČENÍ BEZPLATNÉHO PLÁNU',
+    cfg_free_warning_body: 'Zadané hodnoty překračují bezplatný plán Cloudflare R2 (10 GB) a mohou vést k nákladům na úložiště. Zadejte OKAY (velkými písmeny) pro potvrzení:',
+    cfg_okay_mismatch: 'Musíte zadat OKAY přesně (velkými písmeny).',
+    cfg_btn_confirm: 'POTVRDIT',
+    cfg_btn_cancel: 'ZRUŠIT',
+    js_file_too_large: 'Soubor překračuje nastavený limit uploadu.',
   },
 }
 
