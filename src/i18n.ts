@@ -134,6 +134,25 @@ export interface Translations {
   cfg_btn_confirm: string
   cfg_btn_cancel: string
   js_file_too_large: string
+
+  // ── E2EE file sharing (client-side encryption) ──
+  cfg_turnstile_files_e2ee: string
+  file_toggle_e2ee: string
+  file_e2ee_hint: string
+  file_e2ee_label_key: string
+  file_e2ee_protected: string
+  file_e2ee_btn_decrypt: string
+  file_list_encrypted: string
+  js_e2ee_max_size: string
+  js_e2ee_require_pwd: string
+  js_e2ee_encrypting: string
+  js_e2ee_preparing: string
+  js_e2ee_downloading: string
+  js_e2ee_decrypting: string
+  js_e2ee_decrypt_failed: string
+
+  // ── Drag & drop overlay ──
+  file_drop_here: string
 }
 
 // ── Translations ────────────────────────────────────────────────────────────
@@ -260,6 +279,22 @@ export const I18N: Record<LangCode, Translations> = {
     cfg_btn_confirm: 'CONFIRM',
     cfg_btn_cancel: 'CANCEL',
     js_file_too_large: 'File exceeds the configured upload limit.',
+
+    cfg_turnstile_files_e2ee: 'Protect E2EE downloads',
+    file_toggle_e2ee: 'END-TO-END ENCRYPTION',
+    file_e2ee_hint: 'Client-side AES-GCM + Argon2id. Server never sees contents or passphrase. Max 150 MB. Losing the passphrase makes the file permanently unrecoverable.',
+    file_e2ee_label_key: 'ENCRYPTION PASSPHRASE',
+    file_e2ee_protected: 'ENCRYPTED FILE',
+    file_e2ee_btn_decrypt: 'DECRYPT & DOWNLOAD',
+    file_list_encrypted: 'End-to-end encrypted — passphrase required',
+    js_e2ee_max_size: 'File exceeds the 150 MB E2EE limit.',
+    js_e2ee_require_pwd: 'E2EE requires a passphrase.',
+    js_e2ee_encrypting: 'Encrypting...',
+    js_e2ee_preparing: 'Preparing...',
+    js_e2ee_downloading: 'Downloading',
+    js_e2ee_decrypting: 'Decrypting...',
+    js_e2ee_decrypt_failed: 'Decryption failed — wrong passphrase?',
+    file_drop_here: 'Drop file to upload',
   },
 
   // ────────────────────────── Polski ──────────────────────────
@@ -382,6 +417,22 @@ export const I18N: Record<LangCode, Translations> = {
     cfg_btn_confirm: 'POTWIERDŹ',
     cfg_btn_cancel: 'ANULUJ',
     js_file_too_large: 'Plik przekracza skonfigurowany limit uploadu.',
+
+    cfg_turnstile_files_e2ee: 'Ochrona pobierania E2EE',
+    file_toggle_e2ee: 'SZYFROWANIE END-TO-END',
+    file_e2ee_hint: 'AES-GCM + Argon2id po stronie klienta. Serwer nie widzi zawartości ani hasła. Maks. 150 MB. Utrata hasła = plik nieodzyskiwalny.',
+    file_e2ee_label_key: 'HASŁO SZYFRUJĄCE',
+    file_e2ee_protected: 'ZASZYFROWANY PLIK',
+    file_e2ee_btn_decrypt: 'ODSZYFRUJ I POBIERZ',
+    file_list_encrypted: 'Szyfrowany end-to-end — wymagane hasło',
+    js_e2ee_max_size: 'Plik przekracza limit 150 MB dla E2EE.',
+    js_e2ee_require_pwd: 'E2EE wymaga hasła.',
+    js_e2ee_encrypting: 'Szyfrowanie...',
+    js_e2ee_preparing: 'Przygotowywanie...',
+    js_e2ee_downloading: 'Pobieranie',
+    js_e2ee_decrypting: 'Odszyfrowywanie...',
+    js_e2ee_decrypt_failed: 'Deszyfrowanie nieudane — błędne hasło?',
+    file_drop_here: 'Upuść plik aby wgrać',
   },
 
   // ────────────────────────── Deutsch ──────────────────────────
@@ -504,6 +555,22 @@ export const I18N: Record<LangCode, Translations> = {
     cfg_btn_confirm: 'BESTÄTIGEN',
     cfg_btn_cancel: 'ABBRECHEN',
     js_file_too_large: 'Datei überschreitet das konfigurierte Upload-Limit.',
+
+    cfg_turnstile_files_e2ee: 'E2EE-Downloads schützen',
+    file_toggle_e2ee: 'END-TO-END-VERSCHLÜSSELUNG',
+    file_e2ee_hint: 'Clientseitiges AES-GCM + Argon2id. Der Server sieht weder Inhalt noch Passphrase. Max 150 MB. Verlorene Passphrase macht die Datei dauerhaft nicht wiederherstellbar.',
+    file_e2ee_label_key: 'VERSCHLÜSSELUNGSPASSPHRASE',
+    file_e2ee_protected: 'VERSCHLÜSSELTE DATEI',
+    file_e2ee_btn_decrypt: 'ENTSCHLÜSSELN & HERUNTERLADEN',
+    file_list_encrypted: 'Ende-zu-Ende verschlüsselt — Passphrase erforderlich',
+    js_e2ee_max_size: 'Datei überschreitet das 150-MB-E2EE-Limit.',
+    js_e2ee_require_pwd: 'E2EE benötigt eine Passphrase.',
+    js_e2ee_encrypting: 'Verschlüsselung...',
+    js_e2ee_preparing: 'Vorbereitung...',
+    js_e2ee_downloading: 'Herunterladen',
+    js_e2ee_decrypting: 'Entschlüsselung...',
+    js_e2ee_decrypt_failed: 'Entschlüsselung fehlgeschlagen — falsche Passphrase?',
+    file_drop_here: 'Datei hier ablegen',
   },
 
   // ────────────────────────── Français ──────────────────────────
@@ -626,6 +693,22 @@ export const I18N: Record<LangCode, Translations> = {
     cfg_btn_confirm: 'CONFIRMER',
     cfg_btn_cancel: 'ANNULER',
     js_file_too_large: 'Le fichier dépasse la limite d\'upload configurée.',
+
+    cfg_turnstile_files_e2ee: 'Protéger les téléchargements E2EE',
+    file_toggle_e2ee: 'CHIFFREMENT DE BOUT EN BOUT',
+    file_e2ee_hint: 'AES-GCM + Argon2id côté client. Le serveur ne voit ni le contenu ni la passphrase. Max 150 Mo. Passphrase perdue = fichier définitivement irrécupérable.',
+    file_e2ee_label_key: 'PASSPHRASE DE CHIFFREMENT',
+    file_e2ee_protected: 'FICHIER CHIFFRÉ',
+    file_e2ee_btn_decrypt: 'DÉCHIFFRER ET TÉLÉCHARGER',
+    file_list_encrypted: 'Chiffré de bout en bout — passphrase requise',
+    js_e2ee_max_size: 'Le fichier dépasse la limite E2EE de 150 Mo.',
+    js_e2ee_require_pwd: 'E2EE requiert une passphrase.',
+    js_e2ee_encrypting: 'Chiffrement...',
+    js_e2ee_preparing: 'Préparation...',
+    js_e2ee_downloading: 'Téléchargement',
+    js_e2ee_decrypting: 'Déchiffrement...',
+    js_e2ee_decrypt_failed: 'Échec du déchiffrement — mauvaise passphrase ?',
+    file_drop_here: 'Déposer le fichier ici',
   },
 
   // ────────────────────────── Español ──────────────────────────
@@ -748,6 +831,22 @@ export const I18N: Record<LangCode, Translations> = {
     cfg_btn_confirm: 'CONFIRMAR',
     cfg_btn_cancel: 'CANCELAR',
     js_file_too_large: 'El archivo excede el límite de subida configurado.',
+
+    cfg_turnstile_files_e2ee: 'Proteger descargas E2EE',
+    file_toggle_e2ee: 'CIFRADO DE EXTREMO A EXTREMO',
+    file_e2ee_hint: 'AES-GCM + Argon2id en cliente. El servidor no ve el contenido ni la frase de contraseña. Máx 150 MB. Perder la frase de contraseña hace el archivo irrecuperable.',
+    file_e2ee_label_key: 'FRASE DE CIFRADO',
+    file_e2ee_protected: 'ARCHIVO CIFRADO',
+    file_e2ee_btn_decrypt: 'DESCIFRAR Y DESCARGAR',
+    file_list_encrypted: 'Cifrado extremo a extremo — se requiere frase',
+    js_e2ee_max_size: 'El archivo excede el límite E2EE de 150 MB.',
+    js_e2ee_require_pwd: 'E2EE requiere una frase de contraseña.',
+    js_e2ee_encrypting: 'Cifrando...',
+    js_e2ee_preparing: 'Preparando...',
+    js_e2ee_downloading: 'Descargando',
+    js_e2ee_decrypting: 'Descifrando...',
+    js_e2ee_decrypt_failed: 'Descifrado fallido — ¿frase incorrecta?',
+    file_drop_here: 'Soltar archivo aquí',
   },
 
   // ────────────────────────── Українська ──────────────────────────
@@ -870,6 +969,22 @@ export const I18N: Record<LangCode, Translations> = {
     cfg_btn_confirm: 'ПІДТВЕРДИТИ',
     cfg_btn_cancel: 'СКАСУВАТИ',
     js_file_too_large: 'Файл перевищує налаштований ліміт завантаження.',
+
+    cfg_turnstile_files_e2ee: 'Захист завантажень E2EE',
+    file_toggle_e2ee: 'НАСКРІЗНЕ ШИФРУВАННЯ',
+    file_e2ee_hint: 'AES-GCM + Argon2id на боці клієнта. Сервер не бачить ні вмісту, ні ключа. Макс. 150 МБ. Втрата ключа робить файл безповоротно недоступним.',
+    file_e2ee_label_key: 'КЛЮЧ ШИФРУВАННЯ',
+    file_e2ee_protected: 'ЗАШИФРОВАНИЙ ФАЙЛ',
+    file_e2ee_btn_decrypt: 'РОЗШИФРУВАТИ І ЗАВАНТАЖИТИ',
+    file_list_encrypted: 'Наскрізне шифрування — потрібен ключ',
+    js_e2ee_max_size: 'Файл перевищує обмеження 150 МБ для E2EE.',
+    js_e2ee_require_pwd: 'E2EE вимагає ключа.',
+    js_e2ee_encrypting: 'Шифрування...',
+    js_e2ee_preparing: 'Підготовка...',
+    js_e2ee_downloading: 'Завантаження',
+    js_e2ee_decrypting: 'Розшифрування...',
+    js_e2ee_decrypt_failed: 'Розшифрування не вдалося — неправильний ключ?',
+    file_drop_here: 'Відпустити файл тут',
   },
 
   // ────────────────────────── Português ──────────────────────────
@@ -992,6 +1107,22 @@ export const I18N: Record<LangCode, Translations> = {
     cfg_btn_confirm: 'CONFIRMAR',
     cfg_btn_cancel: 'CANCELAR',
     js_file_too_large: 'O arquivo excede o limite de upload configurado.',
+
+    cfg_turnstile_files_e2ee: 'Proteger downloads E2EE',
+    file_toggle_e2ee: 'CRIPTOGRAFIA DE PONTA A PONTA',
+    file_e2ee_hint: 'AES-GCM + Argon2id no cliente. O servidor não vê o conteúdo nem a passphrase. Máx 150 MB. Perder a passphrase torna o arquivo permanentemente irrecuperável.',
+    file_e2ee_label_key: 'PASSPHRASE DE CRIPTOGRAFIA',
+    file_e2ee_protected: 'ARQUIVO CRIPTOGRAFADO',
+    file_e2ee_btn_decrypt: 'DESCRIPTOGRAFAR E BAIXAR',
+    file_list_encrypted: 'Criptografado ponta a ponta — passphrase necessária',
+    js_e2ee_max_size: 'Arquivo excede o limite de 150 MB para E2EE.',
+    js_e2ee_require_pwd: 'E2EE requer uma passphrase.',
+    js_e2ee_encrypting: 'Criptografando...',
+    js_e2ee_preparing: 'Preparando...',
+    js_e2ee_downloading: 'Baixando',
+    js_e2ee_decrypting: 'Descriptografando...',
+    js_e2ee_decrypt_failed: 'Falha na descriptografia — passphrase errada?',
+    file_drop_here: 'Soltar arquivo aqui',
   },
 
   // ────────────────────────── 中文 (简体) ──────────────────────────
@@ -1114,6 +1245,22 @@ export const I18N: Record<LangCode, Translations> = {
     cfg_btn_confirm: '确认',
     cfg_btn_cancel: '取消',
     js_file_too_large: '文件超过已配置的上传限制。',
+
+    cfg_turnstile_files_e2ee: '保护 E2EE 下载',
+    file_toggle_e2ee: '端到端加密',
+    file_e2ee_hint: '客户端 AES-GCM + Argon2id。服务器看不到内容或密码短语。最大 150 MB。丢失密码短语将使文件永久无法恢复。',
+    file_e2ee_label_key: '加密密码短语',
+    file_e2ee_protected: '加密文件',
+    file_e2ee_btn_decrypt: '解密并下载',
+    file_list_encrypted: '端到端加密 — 需要密码短语',
+    js_e2ee_max_size: '文件超过 E2EE 150 MB 限制。',
+    js_e2ee_require_pwd: 'E2EE 需要密码短语。',
+    js_e2ee_encrypting: '加密中...',
+    js_e2ee_preparing: '准备中...',
+    js_e2ee_downloading: '下载中',
+    js_e2ee_decrypting: '解密中...',
+    js_e2ee_decrypt_failed: '解密失败 — 密码短语错误？',
+    file_drop_here: '放下文件以上传',
   },
 
   // ────────────────────────── Čeština ──────────────────────────
@@ -1236,6 +1383,22 @@ export const I18N: Record<LangCode, Translations> = {
     cfg_btn_confirm: 'POTVRDIT',
     cfg_btn_cancel: 'ZRUŠIT',
     js_file_too_large: 'Soubor překračuje nastavený limit uploadu.',
+
+    cfg_turnstile_files_e2ee: 'Chránit stahování E2EE',
+    file_toggle_e2ee: 'END-TO-END ŠIFROVÁNÍ',
+    file_e2ee_hint: 'AES-GCM + Argon2id na straně klienta. Server nevidí obsah ani heslo. Max 150 MB. Ztráta hesla znamená trvalou ztrátu souboru.',
+    file_e2ee_label_key: 'ŠIFROVACÍ HESLO',
+    file_e2ee_protected: 'ŠIFROVANÝ SOUBOR',
+    file_e2ee_btn_decrypt: 'DEŠIFROVAT A STÁHNOUT',
+    file_list_encrypted: 'End-to-end šifrováno — vyžadováno heslo',
+    js_e2ee_max_size: 'Soubor překračuje 150 MB limit pro E2EE.',
+    js_e2ee_require_pwd: 'E2EE vyžaduje heslo.',
+    js_e2ee_encrypting: 'Šifrování...',
+    js_e2ee_preparing: 'Příprava...',
+    js_e2ee_downloading: 'Stahování',
+    js_e2ee_decrypting: 'Dešifrování...',
+    js_e2ee_decrypt_failed: 'Dešifrování selhalo — špatné heslo?',
+    file_drop_here: 'Pusťte soubor sem',
   },
 }
 

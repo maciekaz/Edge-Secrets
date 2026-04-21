@@ -15,9 +15,11 @@ Secure, one-time sharing of passwords, files and links - built on Cloudflare Wor
 |---|---|
 | **Text secrets** | Zero-knowledge credential sharing - AES-256-GCM, Argon2id key derivation (OWASP 2023), passphrase in URL hash, burn-on-read |
 | **File sharing** | R2-backed, per-file and total caps admin-configurable in Appearance (defaults 9 GB / 9.5 GB, hard ceiling 50 GB), optional password, download limit, server-enforced TTL |
+| **🆕 E2EE file sharing** | Opt-in client-side AES-GCM + Argon2id for files up to 150 MiB. Server stores ciphertext only; passphrase travels in the URL fragment (or out-of-band) and never hits the server |
 | **URL shortener** | Short links with TTL and click limit, SSRF-safe, unbiased ID generation |
 | **Appearance editor** | Accent colour, background colour, brand name, tagline, logo, storage limits - all globally persistent |
 | **Dark / light mode** | System-detected per client, manually overridable |
+| **Drag-and-drop** | Full-screen dim overlay on the files tab; drops a file straight into the upload form |
 | **QR codes** | Server-rendered SVG QR on every output link - scan directly from desktop |
 | **CF Access** | All write/admin endpoints protected by Cloudflare Access + RS256 JWT verification |
 | **Internationalisation** | 9 languages, auto-detected per user, flag picker in the UI |
@@ -124,7 +126,14 @@ sequenceDiagram
 
 ### Files
 
-Files are **not client-side encrypted** - they go directly to R2. Protection is enforced through:
+Files have two independent modes, chosen per-upload via a toggle on `/gen` → Files:
+
+| Mode | When to use | Trust model |
+|---|---|---|
+| **Normal** (default) | Automation, large files up to 50 GB, cases where server-visible content is acceptable | Server has access to the plaintext blob; password (if set) gates retrieval via `SHA-256(pwd + salt + PEPPER)` |
+| **End-to-end encrypted** | Sensitive content that must never touch the server in cleartext; max 150 MiB | Client encrypts with AES-GCM before upload; server stores ciphertext and an Argon2id verifier; no key material ever reaches the server |
+
+#### Normal (server-visible) flow
 
 ```mermaid
 flowchart LR
@@ -139,12 +148,13 @@ flowchart LR
     W -.->|burn when limit reached| R2
 ```
 
-- Optional password (`SHA-256(password + PEPPER)` - verified server-side)
+- Optional password hashed as `SHA-256(password + per-file salt + PEPPER)` with constant-time comparison — each row gets its own 16-byte random salt so identical passwords across files never collide, and timing cannot leak how close a guess was
 - Download limit (1×, 5×, or unlimited)
 - Server-enforced TTL - maximum 7 days regardless of what the client sends
 - Automatic deletion on expiry (hourly cron)
-- Lockout after 3 failed password attempts → file deleted immediately
+- Lockout after 3 failed password attempts → file deleted immediately. The counter increments atomically (`UPDATE … RETURNING`) so parallel guesses cannot race past the 3-try cap
 - Per-file and total storage caps admin-configurable (defaults 9 GB / 9.5 GB, hard ceiling 50 GB per value) — any value above the 10 GiB Cloudflare R2 free tier requires typing `OKAY` to confirm in the Appearance panel
+- After multipart upload completes the server re-reads the R2 object's actual size and rejects the upload if it does not match the size declared at init — blocks a declare-1-byte-upload-200-MB cap bypass
 
 #### Global Pepper
 
@@ -159,6 +169,38 @@ flowchart LR
 
 The Worker refuses to start if `PEPPER` is not set (`bindings guard`).
 
+#### End-to-end encrypted flow (opt-in)
+
+When the uploader flips the **End-to-End Encryption** toggle on the files tab, the file never leaves the browser unencrypted:
+
+```mermaid
+flowchart LR
+    U([Uploader]) -->|AES-GCM in browser| U
+    U -->|ciphertext + IV + Argon2id verifier| W[Worker]
+    W -->|ciphertext blob| R2[(R2)]
+    W -->|metadata + verifier| D1[(D1)]
+    W -->|share link #passphrase| U
+
+    R([Recipient]) -->|POST verifier candidate| W
+    W -->|check verifier · limit · Turnstile| W
+    W -->|ciphertext stream| R
+    R -->|AES-GCM decrypt in browser| R
+```
+
+| Element | Algorithm | Parameters |
+|---|---|---|
+| Key derivation | Argon2id | m=19 MiB, t=2, p=1, 32-byte output (OWASP 2023 minimum) |
+| Salt | File UUID (for AES key) / UUID + `"_v"` (for verifier) | 36 bytes |
+| Encryption | AES-GCM | 256-bit, random 12-byte IV prepended to the ciphertext blob |
+| Verifier | Argon2id output, 32 bytes | Stored base64 in D1, checked via `safeCompare` |
+
+**Constraints and trade-offs:**
+
+- **150 MiB hard cap** on E2EE uploads. AES-GCM in the browser is one-shot (no streaming), so the full plaintext + ciphertext must coexist in RAM — ~300 MB peak for a 150 MB file, which is the ceiling we can rely on for mid-range mobile.
+- **Passphrase is irrecoverable.** Losing it means the file is permanently unreadable. The server has no way to help — it never sees the passphrase or the key.
+- **Independent Turnstile toggle.** `ui:turnstile_files_e2ee` in KV can force a challenge on E2EE downloads without touching the normal-files toggle, which is often left off to keep automation working.
+- **Server trust minimised.** The server stores only the ciphertext, the Argon2id verifier, and the `algoVersion`. A full D1 + R2 leak produces no plaintext.
+
 ---
 
 ## Security
@@ -166,8 +208,11 @@ The Worker refuses to start if `PEPPER` is not set (`bindings guard`).
 | Measure | Description |
 |---|---|
 | **Burn-on-read** | Secret deleted from KV on first successful retrieval |
-| **Rate limiting** | Max 3 attempts; permanent deletion on lockout (secrets & files) |
+| **Rate limiting** | Max 3 attempts; permanent deletion on lockout (secrets & files). File counter increments atomically (`UPDATE … RETURNING`) so parallel requests cannot race past the cap |
 | **TTL preservation** | Failed verifier attempts bump the counter but preserve the secret's original expiration — an attacker cannot keep a short-TTL record alive indefinitely by stopping before the 3rd attempt. Secrets with <60 s remaining are burned instead of refreshed |
+| **Upload size verification** | After multipart complete, the server compares the actual R2 object size against the value declared at init and drops the upload on mismatch. Blocks a declared-small / uploaded-large cap bypass |
+| **Per-file password salt** | File passwords hashed with a per-row random 16-byte salt (`SHA-256(pwd | salt | PEPPER)`), constant-time compared — identical passwords across different files never produce the same digest |
+| **Client-encrypted files (E2EE)** | Opt-in per upload. AES-GCM + Argon2id client-side, server never sees plaintext or key material. Independent Turnstile toggle (`ui:turnstile_files_e2ee`) so a managed challenge can be forced on E2EE downloads without breaking automation on the normal flow |
 | **Global Pepper** | File password hashes include a server-side secret; D1 leak doesn't compromise passwords |
 | **Server-side TTL cap** | Backend enforces maximum lifetime; client cannot exceed it |
 | **CF Access + JWT verification** | Protected endpoints guarded at two layers: Cloudflare Access policy + in-Worker RS256 JWT verification against JWKS endpoint (cached 1 h) |
@@ -237,6 +282,7 @@ API endpoints are grouped under `/api/v1/` in two zones. Cloudflare Access needs
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/api/v1/public/secrets/:id/retrieve` | Retrieve and burn secret |
+| `POST` | `/api/v1/public/files/:id/retrieve-ciphertext` | Verify Argon2id verifier and stream the ciphertext for an E2EE file (client decrypts) |
 | `DELETE` | `/api/v1/public/files/:id` | Delete file (uploader self-service) |
 
 ### Public UI Routes (No auth)
@@ -250,6 +296,7 @@ API endpoints are grouped under `/api/v1/` in two zones. Cloudflare Access needs
 | `GET` | `/ui/logo` | Serve logo image from R2 |
 | `GET` | `/ui/qr` | Generate QR code SVG for a given URL (`?d=encodedUrl`) |
 | `GET` | `/ui/argon2.v1.js` | Serve bundled hash-wasm Argon2id module (immutable, long-cached) |
+| `GET` | `/ui/app.v1.js` | Serve the main client application bundle (short-cached; the file that used to live inline in every page) |
 
 > Full request/response documentation: [docs/api.md](docs/api.md)
 >

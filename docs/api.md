@@ -104,9 +104,12 @@ To retrieve programmatically (e.g. in automation), derive the same verifier from
 ### Files (Multipart Upload)
 
 #### `POST /api/v1/admin/files/init`
-Initiate a multipart upload. Returns the R2 `uploadId` and `key`.
+Initiate a multipart upload. Two modes, selected by the `encrypted` flag:
 
-**Request body (JSON):**
+- **Normal (server-visible) upload** — the client sends plaintext bytes; the server assigns the `id`, hashes the optional password with a fresh per-file salt, and stores the blob as-is.
+- **End-to-end encrypted upload** — the client generates its own UUIDv4 `id`, derives an Argon2id verifier, encrypts the file locally, and uploads the ciphertext. The server stores only the verifier + ciphertext; no password hash, no key material.
+
+**Request body (JSON) — normal:**
 ```json
 {
   "filename": "archive.zip",
@@ -116,6 +119,22 @@ Initiate a multipart upload. Returns the R2 `uploadId` and `key`.
   "limit": 1
 }
 ```
+
+**Request body (JSON) — E2EE:**
+```json
+{
+  "id": "client-generated-uuid-v4",
+  "filename": "secret.pdf",
+  "size": 157286412,
+  "encrypted": true,
+  "verifier": "base64-argon2id-32B",
+  "algoVersion": "argon2id-v1",
+  "ttl": 172800000,
+  "limit": 1
+}
+```
+
+For E2EE the server validates `id` against a UUIDv4 regex, rejects collisions (`409`), and enforces that `verifier` length is in `[32, 128]` and `algoVersion === 'argon2id-v1'`. The server coerces any tampered/unknown values to safe defaults — a caller cannot pin a secret to an unsupported scheme.
 
 **Response `200`:**
 ```json
@@ -132,9 +151,19 @@ Initiate a multipart upload. Returns the R2 `uploadId` and `key`.
 { "error": "UPLOAD_LIMIT" }
 ```
 
+**Response `413`** — E2EE upload exceeds the hard 150 MiB cap:
+```json
+{ "error": "E2EE_UPLOAD_LIMIT" }
+```
+
 **Response `507`** — would exceed the total-storage cap (`ui:max_storage_bytes`, default 9.5 GiB):
 ```json
 { "error": "STORAGE_LIMIT" }
+```
+
+**Response `409`** — E2EE path only: the client-provided `id` collides with an existing row:
+```json
+{ "error": "ID collision" }
 ```
 
 Both caps are admin-controlled via `POST /api/v1/admin/ui/limits` (see below). The server is authoritative — the client's own pre-flight check on `file.size` is UX-only.
@@ -158,7 +187,7 @@ Upload a single part of an ongoing multipart upload.
 ---
 
 #### `POST /api/v1/admin/files/complete`
-Finalize a multipart upload and mark the file as `ready` in D1.
+Finalize a multipart upload and mark the file as `ready` in D1. After R2 stitches the parts, the server compares the resulting object's actual size against the value declared at `/files/init` — on mismatch the object and DB row are both deleted. Without this gate a caller could declare `size: 1` at init (slipping past per-file and total-storage caps) and then push arbitrary amounts through `/files/part`.
 
 **Request body (JSON):**
 ```json
@@ -173,6 +202,11 @@ Finalize a multipart upload and mark the file as `ready` in D1.
 **Response `200`:**
 ```json
 { "ok": true }
+```
+
+**Response `400`** — actual R2 object size differs from the declared size:
+```json
+{ "error": "SIZE_MISMATCH" }
 ```
 
 ---
@@ -262,18 +296,19 @@ All fields are optional. `brand` and `tagline` accept `null` to clear them.
 ---
 
 #### `POST /api/v1/admin/ui/turnstile`
-Configure Cloudflare Turnstile protection.
+Configure Cloudflare Turnstile protection. The three per-feature toggles are independent — `files` and `filesE2ee` especially, so an admin can force a challenge on client-encrypted downloads while leaving automation flows on plain files untouched (or vice versa).
 
 **Request body (JSON):**
 ```json
 {
   "siteKey": "0x4AAAAAAA...",
   "creds": true,
-  "files": false
+  "files": false,
+  "filesE2ee": true
 }
 ```
 
-All fields are optional. Set `siteKey` to `null` to remove it.
+All fields are optional. Set `siteKey` to `null` to remove it. KV keys written: `ui:turnstile_site_key`, `ui:turnstile_creds`, `ui:turnstile_files`, `ui:turnstile_files_e2ee`.
 
 **Response `200`:**
 ```json
@@ -384,6 +419,47 @@ Retrieve and burn an encrypted secret. Verifier is checked before returning ciph
 
 ### Files
 
+#### `POST /api/v1/public/files/:id/retrieve-ciphertext`
+Retrieve the ciphertext of an end-to-end-encrypted file. The server verifies the Argon2id verifier (same pattern as the secrets retrieve endpoint), decrements the download counter (burn on limit), and streams the R2 object body as `application/octet-stream`. The caller strips the 12-byte IV prefix from the response and decrypts locally — the server never sees the key or the plaintext.
+
+**Path parameter:** `id` — file ID (UUIDv4, set by the client at `/files/init`)
+
+**Request body (JSON):**
+```json
+{
+  "verifierCandidate": "base64-argon2id-32B",
+  "cfTurnstileToken": "optional-token"
+}
+```
+
+**Response `200`:** raw ciphertext stream (`Content-Type: application/octet-stream`). First 12 bytes are the AES-GCM IV, rest is the encrypted payload + 16-byte auth tag.
+
+**Response `403`** — wrong verifier. The file's `failed_attempts` counter is bumped atomically with `UPDATE … RETURNING` so parallel attempts cannot race past the cap:
+```json
+{ "error": "RETRY_2" }
+```
+
+**Response `403`** — Turnstile challenge failed (only if `ui:turnstile_files_e2ee` is enabled — this is a separate toggle from the normal-files Turnstile, so admins can force a challenge on E2EE without breaking automation on non-encrypted uploads):
+```json
+{ "error": "CHALLENGE_FAILED" }
+```
+
+**Response `404`** — no such file, or the row exists but is not E2EE (`encrypted != 1`):
+```json
+{ "error": "NOT_FOUND" }
+```
+
+**Response `410`** — either the 3-attempt cap was reached (burn), or the file was already expired / downloaded:
+```json
+{ "error": "TERMINATED" }
+```
+or
+```json
+{ "error": "EXPIRED" }
+```
+
+---
+
 #### `DELETE /api/v1/public/files/:id`
 Delete a file from R2 and D1. Intentionally outside CF Access - used by the uploader immediately after generating a link if they choose to revoke it.
 
@@ -406,10 +482,11 @@ These routes are HTML pages or static assets and must remain outside CF Access:
 | `GET` | `/share/:id` | File download / Turnstile gate |
 | `POST` | `/share/:id` | File download form submission (Turnstile + password) |
 | `GET` | `/s/:id` | Short-link redirect |
-| `GET` | `/ui/config` | Global UI settings — accent, bg, brand, tagline, Turnstile flags, and current storage caps (`maxStorageGb`, `maxUploadGb`, `freeTierGb`) |
+| `GET` | `/ui/config` | Global UI settings — accent, bg, brand, tagline, all three Turnstile flags (`turnstileCreds` / `turnstileFiles` / `turnstileFilesE2ee`), current storage caps (`maxStorageGb`, `maxUploadGb`, `freeTierGb`), and the fixed E2EE cap (`e2eeMaxUploadMb`) |
 | `GET` | `/ui/logo` | Brand logo from R2 |
 | `GET` | `/ui/qr` | Server-rendered SVG QR code (`?d=encodedUrl`) |
 | `GET` | `/ui/argon2.v1.js` | Bundled hash-wasm Argon2id module. `immutable` cached; same-origin delivery so no external CDN enters the CSP. Bump the version suffix (`v1` → `v2`) when swapping implementations |
+| `GET` | `/ui/app.v1.js` | Main client application bundle (`const`s, event handlers, `derive`, upload/decrypt pipelines, …). Served with `Cache-Control: public, max-age=60` so deploys propagate within a minute. Bump the version suffix if a breaking change requires immediate cache invalidation |
 
 ---
 
@@ -429,5 +506,6 @@ HTTP status codes used:
 | 403 | Forbidden (wrong verifier, Turnstile failed) |
 | 404 | Not found |
 | 410 | Gone (expired, burned, or `TERMINATED`) |
-| 413 | Payload too large (`UPLOAD_LIMIT` — single file exceeds per-file cap) |
+| 409 | Conflict (client-provided UUID already exists — E2EE `/files/init`) |
+| 413 | Payload too large (`UPLOAD_LIMIT` — non-E2EE file exceeds per-file cap; `E2EE_UPLOAD_LIMIT` — E2EE file exceeds the 150 MiB ceiling) |
 | 507 | Insufficient storage (`STORAGE_LIMIT` — total cap exceeded) |

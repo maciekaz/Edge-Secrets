@@ -21,6 +21,11 @@ const CONFIG = {
   // Cloudflare R2 free tier. Crossing this requires an admin OKAY
   // confirmation in the UI and may incur costs.
   freeTierBytes: 10 * GiB,
+  // Hard cap for end-to-end-encrypted file uploads. AES-GCM is one-shot
+  // (no streaming mode), so the entire plaintext + ciphertext must live in
+  // browser RAM at once — ~300 MB peak for a 150 MB file. Above this we'd
+  // OOM on mid-range mobile. Not configurable by admin.
+  e2eeMaxUpload: 150 * 1024 * 1024,
   visualTtl: 300,
 } as const
 
@@ -53,9 +58,13 @@ interface FileRecord {
   expires_at: number
   status: string
   password_hash: string | null
+  password_salt: string | null   // per-file random salt (H2 fix); NULL for legacy rows
   max_downloads: number
   download_count: number
   failed_attempts: number
+  encrypted: number              // 0 = server-visible, 1 = client-side AES-GCM ciphertext
+  verifier: string | null        // Argon2id verifier, set only when encrypted=1
+  algo_version: string | null    // 'argon2id-v1' when encrypted=1
 }
 
 interface SecretMetadata {
@@ -89,6 +98,13 @@ interface UploadInitBody {
   password?: string
   ttl?: number
   limit?: number | string
+  // E2EE (client-encrypted) fields — when `encrypted` is true, the body
+  // includes the client-generated UUID + Argon2id verifier that the
+  // retrieve-ciphertext endpoint will check before streaming the blob.
+  id?: string
+  encrypted?: boolean
+  verifier?: string
+  algoVersion?: AlgoVersion
 }
 
 interface UploadCompleteBody {
@@ -103,10 +119,23 @@ interface UploadCompleteBody {
 const HTML_SECURITY_HEADERS: Record<string, string> = {
   'Content-Type': 'text/html;charset=UTF-8',
   'Content-Security-Policy':
-    "default-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://challenges.cloudflare.com; style-src 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data:; connect-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; object-src 'none'; frame-ancestors 'none';",
+    "default-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data:; connect-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests;",
+  // HSTS — 1 year, include subdomains, and opt-in to browser preload lists.
+  // Requires the site to always be HTTPS-reachable for the max-age window.
+  'Strict-Transport-Security': 'max-age=31536000; includeSubDomains; preload',
   'X-Frame-Options': 'DENY',
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer',
+  // Cross-origin isolation — prevents an opener/opened window from another
+  // origin sharing a browsing-context group with our secret pages.
+  'Cross-Origin-Opener-Policy': 'same-origin',
+  // Prevents this page from being loaded as a subresource in another origin
+  // (e.g. <img src="…/receive/ID">). Defense-in-depth alongside frame-ancestors.
+  'Cross-Origin-Resource-Policy': 'same-origin',
+  // Explicitly deny every permission-gated browser API we don't use. Locks
+  // out a compromised script from requesting camera/mic/location/etc.
+  'Permissions-Policy':
+    'accelerometer=(), autoplay=(), bluetooth=(), camera=(), cross-origin-isolated=(), display-capture=(), encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), hid=(), idle-detection=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), publickey-credentials-get=(), screen-wake-lock=(), serial=(), sync-xhr=(), usb=(), web-share=(), xr-spatial-tracking=(), interest-cohort=()',
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -119,6 +148,18 @@ function escapeHtml(unsafe: unknown): unknown {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;')
+}
+
+// Safer JSON embedding for inline <script> blocks. JSON.stringify escapes
+// quotes and backslashes but leaves `<` alone — so a string containing
+// `</script>` would terminate the enclosing <script> tag and let any HTML
+// that follows execute. U+2028 / U+2029 are ES5 line terminators that also
+// break literal strings. Escape all three.
+function jsonEmbed(v: unknown): string {
+  return JSON.stringify(v)
+    .replace(/</g, '\\u003c')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029')
 }
 
 // Resolve effective storage caps — KV-stored overrides fall back to CONFIG
@@ -190,6 +231,23 @@ const hashPwd = async (p: string | null | undefined, pepper: string): Promise<st
   return Array.from(new Uint8Array(buf))
     .map((x) => x.toString(16).padStart(2, '0'))
     .join('')
+}
+
+// Per-file salted variant — preferred over the plain `hashPwd` because identical
+// passwords across different files no longer produce identical digests (H2 fix).
+// Format `p | salt | pepper` with literal `|` separators so nothing overlaps
+// across the three inputs. Legacy rows (no salt) still verify via plain hashPwd.
+const hashPwdSalted = async (p: string, salt: string, pepper: string): Promise<string> => {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(p + '|' + salt + '|' + pepper))
+  return Array.from(new Uint8Array(buf))
+    .map((x) => x.toString(16).padStart(2, '0'))
+    .join('')
+}
+
+// Generate a random base64 salt for per-file password hashing.
+function generateSalt(): string {
+  const b = crypto.getRandomValues(new Uint8Array(16))
+  return btoa(String.fromCharCode(...b))
 }
 
 async function verifyTurnstile(token: string, secret: string, remoteip?: string): Promise<boolean> {
@@ -314,9 +372,12 @@ const requireAccess: MiddlewareHandler<{ Bindings: Bindings }> = async (c, next)
 
 const app = new Hono<{ Bindings: Bindings }>()
 
-// CORS middleware — handles OPTIONS preflight and injects headers on all routes
+// CORS middleware — scoped to /api/* only so HTML responses don't carry the
+// Access-Control-Allow-Origin header (it's meaningless for top-level HTML and
+// makes security scanners complain). `share/:id` file downloads keep their
+// own explicit ACAO on the R2 stream response.
 app.use(
-  '*',
+  '/api/*',
   cors({
     origin: '*',
     allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -381,6 +442,20 @@ app.get('/ui/argon2.v1.js', () => {
   })
 })
 
+// Main app JS — the chunk that used to live inline inside every HTML page
+// as `${CLIENT_JS}`. Moved here so CSP can eventually drop `'unsafe-inline'`
+// from script-src. Short max-age: this file changes with every deploy, so
+// we let the browser revalidate quickly instead of immutable-caching it.
+app.get('/ui/app.v1.js', () => {
+  return new Response(CLIENT_JS_BODY, {
+    headers: {
+      'Content-Type': 'application/javascript; charset=utf-8',
+      'Cache-Control': 'public, max-age=60',
+      'X-Content-Type-Options': 'nosniff',
+    },
+  })
+})
+
 // QR code generator — public, server-side SVG rendering
 app.get('/ui/qr', (c) => {
   const raw = c.req.query('d') ?? ''
@@ -417,7 +492,7 @@ app.get('/ui/qr', (c) => {
 
 // Global UI config — public read, protected write
 app.get('/ui/config', async (c) => {
-  const [accent, bg, brand, tagline, tsSiteKey, tsCreds, tsFiles, limits] = await Promise.all([
+  const [accent, bg, brand, tagline, tsSiteKey, tsCreds, tsFiles, tsFilesE2ee, limits] = await Promise.all([
     c.env.SECRETS_STORE.get('ui:accent'),
     c.env.SECRETS_STORE.get('ui:bg'),
     c.env.SECRETS_STORE.get('ui:brand'),
@@ -425,6 +500,7 @@ app.get('/ui/config', async (c) => {
     c.env.SECRETS_STORE.get('ui:turnstile_site_key'),
     c.env.SECRETS_STORE.get('ui:turnstile_creds'),
     c.env.SECRETS_STORE.get('ui:turnstile_files'),
+    c.env.SECRETS_STORE.get('ui:turnstile_files_e2ee'),
     getStorageLimits(c.env),
   ])
   return c.json({
@@ -432,12 +508,14 @@ app.get('/ui/config', async (c) => {
     bg:      bg      ?? '#000000',
     brand:   brand   ?? null,
     tagline: tagline ?? null,
-    turnstileSiteKey: tsSiteKey ?? null,
-    turnstileCreds:   tsCreds === '1',
-    turnstileFiles:   tsFiles === '1',
-    maxStorageGb: limits.maxStorage / GiB,
-    maxUploadGb:  limits.maxUpload  / GiB,
-    freeTierGb:   CONFIG.freeTierBytes / GiB,
+    turnstileSiteKey:     tsSiteKey    ?? null,
+    turnstileCreds:       tsCreds      === '1',
+    turnstileFiles:       tsFiles      === '1',
+    turnstileFilesE2ee:   tsFilesE2ee  === '1',
+    maxStorageGb:  limits.maxStorage / GiB,
+    maxUploadGb:   limits.maxUpload  / GiB,
+    freeTierGb:    CONFIG.freeTierBytes / GiB,
+    e2eeMaxUploadMb: CONFIG.e2eeMaxUpload / (1024 * 1024),
   })
 })
 
@@ -489,9 +567,12 @@ app.post('/api/v1/admin/ui/limits', async (c) => {
   return c.json({ ok: true })
 })
 
-// Turnstile settings — site key (public) + per-feature toggles
+// Turnstile settings — site key (public) + per-feature toggles. `filesE2ee`
+// is intentionally separate from `files` so the admin can force a challenge
+// on client-encrypted downloads while leaving automation flows (normal files)
+// untouched, or vice versa.
 app.post('/api/v1/admin/ui/turnstile', async (c) => {
-  const body = await c.req.json<{ siteKey?: string | null; creds?: boolean; files?: boolean }>()
+  const body = await c.req.json<{ siteKey?: string | null; creds?: boolean; files?: boolean; filesE2ee?: boolean }>()
   if (body.siteKey !== undefined && body.siteKey !== null && typeof body.siteKey !== 'string') {
     return c.json({ error: 'Invalid siteKey' }, 400)
   }
@@ -507,6 +588,9 @@ app.post('/api/v1/admin/ui/turnstile', async (c) => {
       : Promise.resolve(),
     body.files !== undefined
       ? c.env.SECRETS_STORE.put('ui:turnstile_files', body.files ? '1' : '0')
+      : Promise.resolve(),
+    body.filesE2ee !== undefined
+      ? c.env.SECRETS_STORE.put('ui:turnstile_files_e2ee', body.filesE2ee ? '1' : '0')
       : Promise.resolve(),
   ])
   return c.json({ ok: true })
@@ -708,14 +792,28 @@ app.get('/api/v1/admin/stats', async (c) => {
   })
 })
 
-// Initiate multipart upload
+// Initiate multipart upload. Two modes:
+//   • encrypted=false (default) — server-visible file with server-side
+//     password hash (SHA-256 + per-file salt + pepper). Cap = configurable
+//     `ui:max_upload_bytes`.
+//   • encrypted=true — end-to-end encrypted. Body must carry a client-generated
+//     UUID (used as the Argon2id salt on the client) plus the derived
+//     verifier + algoVersion. Server stores those and nothing else — no
+//     plaintext, no passphrase, no key. Hard cap CONFIG.e2eeMaxUpload (150 MiB)
+//     regardless of the configurable per-file cap.
 app.post('/api/v1/admin/files/init', async (c) => {
-  const { filename, size, password, ttl, limit } = await c.req.json<UploadInitBody>()
+  const body = await c.req.json<UploadInitBody>()
+  const { filename, size, password, ttl, limit, encrypted, verifier, algoVersion } = body
+  const isE2ee = encrypted === true
   const { maxStorage, maxUpload } = await getStorageLimits(c.env)
+
   if (typeof size !== 'number' || !Number.isFinite(size) || size <= 0) {
     return c.json({ error: 'INVALID_SIZE' }, 400)
   }
-  if (size > maxUpload) {
+  if (isE2ee && size > CONFIG.e2eeMaxUpload) {
+    return c.json({ error: 'E2EE_UPLOAD_LIMIT' }, 413)
+  }
+  if (!isE2ee && size > maxUpload) {
     return c.json({ error: 'UPLOAD_LIMIT' }, 413)
   }
   const s = await c.env.DB.prepare(
@@ -724,11 +822,46 @@ app.post('/api/v1/admin/files/init', async (c) => {
   if ((s?.t ?? 0) + size > maxStorage) {
     return c.json({ error: 'STORAGE_LIMIT' }, 507)
   }
+
+  // E2EE validation — accept only the values we actually ship; the client
+  // provides the file id so its Argon2id derivations stay consistent.
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+  let id: string
+  let dbVerifier: string | null = null
+  let dbAlgoVersion: string | null = null
+  if (isE2ee) {
+    if (!body.id || !UUID_RE.test(body.id)) {
+      return c.json({ error: 'E2EE requires a valid UUIDv4 id' }, 400)
+    }
+    if (typeof verifier !== 'string' || verifier.length < 32 || verifier.length > 128) {
+      return c.json({ error: 'E2EE requires a base64 verifier' }, 400)
+    }
+    if (algoVersion !== 'argon2id-v1') {
+      return c.json({ error: 'Unsupported algoVersion' }, 400)
+    }
+    // Collision check — vanishingly unlikely with v4 UUIDs, but cheap and defensive.
+    const dup = await c.env.DB.prepare('SELECT id FROM files WHERE id=?').bind(body.id).first()
+    if (dup) return c.json({ error: 'ID collision' }, 409)
+    id = body.id
+    dbVerifier = verifier
+    dbAlgoVersion = algoVersion
+  } else {
+    id = crypto.randomUUID()
+  }
+
+  // Password hashing (server-visible path only). E2EE skips this entirely —
+  // the verifier column takes the place of password_hash for access control.
+  let passwordHash: string | null = null
+  let passwordSalt: string | null = null
+  if (!isE2ee && password) {
+    passwordSalt = generateSalt()
+    passwordHash = await hashPwdSalted(password, passwordSalt, c.env.PEPPER)
+  }
+
   const safeTtl = Math.min(ttl ?? 172_800_000, CONFIG.maxTtl * 1000)
-  const id = crypto.randomUUID()
   const mp = await c.env.BUCKET.createMultipartUpload(id)
   await c.env.DB.prepare(
-    'INSERT INTO files (id,filename,size,created_at,expires_at,status,password_hash,max_downloads,download_count,failed_attempts) VALUES (?,?,?,?,?, "pending", ?, ?, 0, 0)'
+    'INSERT INTO files (id,filename,size,created_at,expires_at,status,password_hash,password_salt,max_downloads,download_count,failed_attempts,encrypted,verifier,algo_version) VALUES (?,?,?,?,?, "pending", ?,?,?,0,0,?,?,?)'
   )
     .bind(
       id,
@@ -736,8 +869,12 @@ app.post('/api/v1/admin/files/init', async (c) => {
       size,
       Date.now(),
       Date.now() + safeTtl,
-      await hashPwd(password, c.env.PEPPER),
-      parseInt(String(limit ?? 1))
+      passwordHash,
+      passwordSalt,
+      parseInt(String(limit ?? 1)),
+      isE2ee ? 1 : 0,
+      dbVerifier,
+      dbAlgoVersion
     )
     .run()
   return c.json({ key: id, uploadId: mp.uploadId, fileId: id })
@@ -758,15 +895,100 @@ app.put('/api/v1/admin/files/part', async (c) => {
   return c.json(part)
 })
 
-// Finalize multipart upload
+// Finalize multipart upload. After R2 completes the multipart, we read back
+// the object's actual size and compare it against the value declared at
+// /files/init. Without this check, a caller could declare `size: 1` on init
+// (slipping past every per-file and total-storage cap) and then PUT hundreds
+// of megabytes through /files/part — R2 would stitch them together without
+// ever re-validating against the declared limit. A mismatch is treated as
+// a failed upload: the object is dropped from R2 and the D1 row deleted.
 app.post('/api/v1/admin/files/complete', async (c) => {
   const body = await c.req.json<UploadCompleteBody>()
   const mp = c.env.BUCKET.resumeMultipartUpload(body.key, body.uploadId)
   await mp.complete(body.parts)
+
+  const [obj, declared] = await Promise.all([
+    c.env.BUCKET.head(body.key),
+    c.env.DB.prepare('SELECT size FROM files WHERE id=?').bind(body.fileId).first<{ size: number }>(),
+  ])
+  if (!obj || !declared || obj.size !== declared.size) {
+    await c.env.BUCKET.delete(body.key)
+    await c.env.DB.prepare('DELETE FROM files WHERE id=?').bind(body.fileId).run()
+    return c.json({ error: 'SIZE_MISMATCH' }, 400)
+  }
+
   await c.env.DB.prepare('UPDATE files SET status="ready" WHERE id=?')
     .bind(body.fileId)
     .run()
   return c.json({ ok: true })
+})
+
+// Retrieve the raw ciphertext blob for an E2EE file. Flow:
+//   1) Optional Turnstile challenge (`ui:turnstile_files_e2ee` toggle, independent
+//      of the normal-files toggle — admin can force a challenge on client-
+//      encrypted downloads without breaking automation on non-encrypted ones).
+//   2) Verify the client-provided Argon2id verifier against the one stored at
+//      upload time. Wrong verifier bumps `failed_attempts`; at CONFIG.maxAttempts
+//      the row + R2 object are burned.
+//   3) Enforce the download limit exactly like the normal flow (`shouldBurn`).
+//   4) Stream the R2 object body as application/octet-stream — the client
+//      strips the 12-byte IV prefix and decrypts in the browser.
+app.post('/api/v1/public/files/:id/retrieve-ciphertext', async (c) => {
+  const id = c.req.param('id')
+  const body = await c.req.json<{ verifierCandidate: string; cfTurnstileToken?: string }>()
+  const { verifierCandidate } = body
+
+  const [tsEnabled, tsSiteKey] = await Promise.all([
+    c.env.SECRETS_STORE.get('ui:turnstile_files_e2ee'),
+    c.env.SECRETS_STORE.get('ui:turnstile_site_key'),
+  ])
+  if (tsEnabled === '1' && !!tsSiteKey && !!c.env.TURNSTILE_SECRET) {
+    const ip = c.req.header('CF-Connecting-IP') ?? undefined
+    const valid = await verifyTurnstile(body.cfTurnstileToken ?? '', c.env.TURNSTILE_SECRET, ip)
+    if (!valid) return c.json({ error: 'CHALLENGE_FAILED' }, 403)
+  }
+
+  const f = await c.env.DB.prepare('SELECT * FROM files WHERE id=?')
+    .bind(id)
+    .first<FileRecord>()
+  if (!f || f.encrypted !== 1 || !f.verifier) {
+    return c.json({ error: 'NOT_FOUND' }, 404)
+  }
+  if (f.status === 'downloaded' || f.expires_at < Date.now()) {
+    return c.json({ error: 'EXPIRED' }, 410)
+  }
+  if (typeof verifierCandidate !== 'string' || !safeCompare(f.verifier, verifierCandidate)) {
+    const newCount = await bumpFailedAttempts(c.env.DB, id, CONFIG.maxAttempts)
+    if (newCount === null || newCount >= CONFIG.maxAttempts) {
+      c.executionCtx.waitUntil(c.env.BUCKET.delete(id))
+      await c.env.DB.prepare('DELETE FROM files WHERE id=?').bind(id).run()
+      return c.json({ error: 'TERMINATED' }, 410)
+    }
+    return c.json({ error: `RETRY_${CONFIG.maxAttempts - newCount}` }, 403)
+  }
+
+  // Verifier matches — update the download counter (burn on limit) and stream.
+  const curDL = (f.download_count ?? 0) + 1
+  const shouldBurn = f.max_downloads !== -1 && curDL >= f.max_downloads
+  if (shouldBurn) {
+    await c.env.DB.prepare('UPDATE files SET status="downloaded", download_count=? WHERE id=?')
+      .bind(curDL, id)
+      .run()
+  } else {
+    await c.env.DB.prepare('UPDATE files SET download_count=? WHERE id=?')
+      .bind(curDL, id)
+      .run()
+  }
+
+  const obj = await c.env.BUCKET.get(id)
+  if (!obj) return c.json({ error: 'OBJECT_MISSING' }, 404)
+  if (shouldBurn) c.executionCtx.waitUntil(c.env.BUCKET.delete(id))
+
+  const headers = new Headers()
+  headers.set('Content-Type', 'application/octet-stream')
+  headers.set('Cache-Control', 'no-store')
+  headers.set('Access-Control-Allow-Origin', '*')
+  return new Response(obj.body, { headers })
 })
 
 // Delete file from R2 + D1
@@ -787,6 +1009,40 @@ app.onError((err, c) => {
 
 // ── File Download Handlers ────────────────────────────────────────────────────
 
+// Atomically bump `failed_attempts` on a file row with a server-side cap check.
+// Returns the new counter value when the row existed and was under the cap;
+// returns `null` when the UPDATE matched nothing — either the row has been
+// deleted or another concurrent request already pushed the counter to the
+// max. Callers treat `null` and `>= max` identically: burn the record.
+//
+// This closes a race window on the legacy `SELECT → compute → UPDATE` flow,
+// where N parallel wrong-verifier requests could each read `failed_attempts:
+// 0` and each write `1`, effectively letting the retry budget balloon with
+// parallelism.
+async function bumpFailedAttempts(db: D1Database, id: string, max: number): Promise<number | null> {
+  const row = await db
+    .prepare('UPDATE files SET failed_attempts = failed_attempts + 1 WHERE id=? AND failed_attempts < ? RETURNING failed_attempts')
+    .bind(id, max)
+    .first<{ failed_attempts: number }>()
+  return row ? row.failed_attempts : null
+}
+
+// Re-verify a posted password against the stored hash, transparently handling
+// both the current salted scheme and legacy unsalted rows (H2 fix with a
+// fallback path). Returns `true` when the caller is authorised.
+async function verifyFilePassword(input: string, f: FileRecord, pepper: string): Promise<boolean> {
+  if (!f.password_hash) return true
+  if (f.password_salt) {
+    const hash = await hashPwdSalted(input, f.password_salt, pepper)
+    return safeCompare(hash, f.password_hash)
+  }
+  // Legacy row (no salt) — keep the old unsalted scheme but still compare in
+  // constant time. Rows get resalted on the next create; they drop out of
+  // the DB once their TTL expires.
+  const legacyHash = await hashPwd(input, pepper)
+  return legacyHash !== null && safeCompare(legacyHash, f.password_hash)
+}
+
 async function handleFileDownload(c: Context<{ Bindings: Bindings }>): Promise<Response> {
   const id = c.req.param('id')
   if (!id) return c.text('BAD_REQUEST', 400)
@@ -799,6 +1055,22 @@ async function handleFileDownload(c: Context<{ Bindings: Bindings }>): Promise<R
   if (!f) return c.html('FILE_NOT_FOUND', 404, HTML_SECURITY_HEADERS)
   if (f.status === 'downloaded' || f.expires_at < Date.now()) {
     return c.html('LINK_EXPIRED', 410, HTML_SECURITY_HEADERS)
+  }
+
+  // E2EE files — the recipient's browser owns the key derivation and the
+  // decryption. Server never sees plaintext. We always render the decrypt UI;
+  // there is no direct-download path and no server-side password check.
+  if (f.encrypted === 1) {
+    const [tsE2eeEnabled, tsSiteKey] = await Promise.all([
+      env.SECRETS_STORE.get('ui:turnstile_files_e2ee'),
+      env.SECRETS_STORE.get('ui:turnstile_site_key'),
+    ])
+    const tsActive = tsE2eeEnabled === '1' && !!tsSiteKey && !!env.TURNSTILE_SECRET
+    return c.html(
+      renderReceiveFileE2EE(id, f.filename, lang, langCode, tsActive ? tsSiteKey! : null),
+      200,
+      HTML_SECURITY_HEADERS
+    )
   }
 
   // Check Turnstile settings — if active, always show gate page (Option B)
@@ -822,16 +1094,13 @@ async function handleFileDownload(c: Context<{ Bindings: Bindings }>): Promise<R
     if (!pwdParam) {
       return c.html(renderReceiveFile(f.filename, lang, langCode), 200, HTML_SECURITY_HEADERS)
     }
-    if ((await hashPwd(pwdParam, env.PEPPER)) !== f.password_hash) {
-      const att = (f.failed_attempts ?? 0) + 1
-      if (att >= CONFIG.maxAttempts) {
+    if (!(await verifyFilePassword(pwdParam, f, env.PEPPER))) {
+      const newCount = await bumpFailedAttempts(env.DB, id, CONFIG.maxAttempts)
+      if (newCount === null || newCount >= CONFIG.maxAttempts) {
         c.executionCtx.waitUntil(env.BUCKET.delete(id))
         await env.DB.prepare('DELETE FROM files WHERE id=?').bind(id).run()
         return c.text('FILE_DELETED', 410)
       }
-      await env.DB.prepare('UPDATE files SET failed_attempts=? WHERE id=?')
-        .bind(att, id)
-        .run()
       return c.text('INVALID_PASSWORD', 403)
     }
   }
@@ -851,6 +1120,11 @@ async function handleFilePost(c: Context<{ Bindings: Bindings }>): Promise<Respo
   if (!f) return c.html('FILE_NOT_FOUND', 404, HTML_SECURITY_HEADERS)
   if (f.status === 'downloaded' || f.expires_at < Date.now()) {
     return c.html('LINK_EXPIRED', 410, HTML_SECURITY_HEADERS)
+  }
+  // E2EE files never use the form-POST flow — they go through the
+  // retrieve-ciphertext JSON endpoint. Bounce back to the decrypt UI.
+  if (f.encrypted === 1) {
+    return new Response(null, { status: 303, headers: { Location: `/share/${id}` } })
   }
 
   const form = await c.req.formData()
@@ -884,16 +1158,13 @@ async function handleFilePost(c: Context<{ Bindings: Bindings }>): Promise<Respo
         HTML_SECURITY_HEADERS
       )
     }
-    if ((await hashPwd(pwdParam, env.PEPPER)) !== f.password_hash) {
-      const att = (f.failed_attempts ?? 0) + 1
-      if (att >= CONFIG.maxAttempts) {
+    if (!(await verifyFilePassword(pwdParam, f, env.PEPPER))) {
+      const newCount = await bumpFailedAttempts(env.DB, id, CONFIG.maxAttempts)
+      if (newCount === null || newCount >= CONFIG.maxAttempts) {
         c.executionCtx.waitUntil(env.BUCKET.delete(id))
         await env.DB.prepare('DELETE FROM files WHERE id=?').bind(id).run()
         return c.text('FILE_DELETED', 410)
       }
-      await env.DB.prepare('UPDATE files SET failed_attempts=? WHERE id=?')
-        .bind(att, id)
-        .run()
       // Re-render gate with error (fresh challenge needed)
       return new Response(null, { status: 303, headers: { Location: `/share/${id}?err=1` } })
     }
@@ -1007,6 +1278,9 @@ textarea{min-height:120px;font-family:'Inter',monospace;resize:vertical}
 .drop-zone{border:1px dashed var(--border-strong);padding:36px 20px;text-align:center;cursor:pointer;background:var(--surface-2);margin-bottom:18px;transition:all 0.2s;position:relative}
 .drop-zone>*{pointer-events:none}
 .drop-zone:hover{border-color:var(--accent);background:var(--accent-dim);box-shadow:0 0 40px -12px var(--accent-glow)}
+.drag-overlay{position:fixed;inset:0;display:none;z-index:9999;pointer-events:none;background:rgba(0,0,0,0.45);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);align-items:center;justify-content:center}
+.drag-overlay.active{display:flex}
+.drag-overlay-inner{color:#fff;font-size:0.9rem;font-weight:500;letter-spacing:0.04em;opacity:0.85}
 .input-group{display:flex;gap:6px;margin-bottom:18px}
 .input-group input{margin-bottom:0;flex:1}
 .btn-copy{background:var(--surface-2);color:var(--text-muted);border:1px solid var(--border-strong);border-radius:0;font-weight:600;padding:0 16px;cursor:pointer;min-width:80px;transition:all 0.2s;display:flex;align-items:center;justify-content:center;font-size:0.65rem;text-transform:uppercase;letter-spacing:0.08em}
@@ -1076,8 +1350,10 @@ ${LANG_PICKER_CSS}
 .ts-verify-wrap{text-align:center;padding:20px 0 10px}
 .ts-verify-label{font-size:0.65rem;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;color:var(--text-muted);margin-bottom:16px;display:block}`
 
-const CLIENT_JS = `
-<script>
+// Pure JS body — served externally at /ui/app.v1.js so we can start pulling
+// `'unsafe-inline'` out of the script-src CSP. Still referenced by every
+// page via a <script src=...> tag in BASE_HTML.
+const CLIENT_JS_BODY = `
 const get = (id) => document.getElementById(id);
 const modal = (t, m) => { get('mT').innerText = t; get('mMsg').innerText = m; get('ov').style.display = 'flex'; };
 const setL = (btn, s) => { if (btn) { btn.disabled = s; const sp = btn.querySelector('.spinner'); if (sp) sp.style.display = s ? 'block' : 'none'; } };
@@ -1130,6 +1406,7 @@ function saveConfig(){
     var sk=(get('cfgTsSiteKey')||{value:''}).value.trim();
     var tsCreds=!!(get('cfgTsCreds')||{}).checked;
     var tsFiles=!!(get('cfgTsFiles')||{}).checked;
+    var tsFilesE2ee=!!(get('cfgTsFilesE2ee')||{}).checked;
     var mStorage=parseFloat((get('cfgMaxStorage')||{value:'9.5'}).value);
     var mUpload=parseFloat((get('cfgMaxUpload')||{value:'9'}).value);
     if(!isFinite(mStorage)||mStorage<=0||!isFinite(mUpload)||mUpload<=0){
@@ -1140,16 +1417,16 @@ function saveConfig(){
     }
     var free=(window.__limits&&window.__limits.freeTierGb)||10;
     var needsOkay=(mStorage>free||mUpload>free);
-    var go=function(){_saveAllConfig(accent,bg,brand,tagline,sk,tsCreds,tsFiles,mStorage,mUpload);};
+    var go=function(){_saveAllConfig(accent,bg,brand,tagline,sk,tsCreds,tsFiles,tsFilesE2ee,mStorage,mUpload);};
     if(needsOkay){_openOkayGate(go);return;}
     go();
 }
 
-function _saveAllConfig(accent,bg,brand,tagline,sk,tsCreds,tsFiles,mStorage,mUpload){
+function _saveAllConfig(accent,bg,brand,tagline,sk,tsCreds,tsFiles,tsFilesE2ee,mStorage,mUpload){
     var btn=get('cfgSave');if(btn){btn.disabled=true;btn.textContent='...';}
     Promise.all([
         fetch('/api/v1/admin/ui/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({accent:accent,bg:bg,brand:brand||null,tagline:tagline||null})}),
-        fetch('/api/v1/admin/ui/turnstile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({siteKey:sk||null,creds:tsCreds,files:tsFiles})}),
+        fetch('/api/v1/admin/ui/turnstile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({siteKey:sk||null,creds:tsCreds,files:tsFiles,filesE2ee:tsFilesE2ee})}),
         fetch('/api/v1/admin/ui/limits',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({maxStorageGb:mStorage,maxUploadGb:mUpload})})
     ])
         .then(function(rs){return Promise.all(rs.map(function(r){if(!r.ok)return r.json().then(function(e){throw new Error((e&&e.error)||'save failed');});return r.json();}));})
@@ -1221,6 +1498,7 @@ async function shorten(){
         var tsk=get('cfgTsSiteKey');if(tsk&&cfg.turnstileSiteKey)tsk.value=cfg.turnstileSiteKey;
         var tc=get('cfgTsCreds');if(tc)tc.checked=!!cfg.turnstileCreds;
         var tf=get('cfgTsFiles');if(tf)tf.checked=!!cfg.turnstileFiles;
+        var tfe=get('cfgTsFilesE2ee');if(tfe)tfe.checked=!!cfg.turnstileFilesE2ee;
         var sGb=(typeof cfg.maxStorageGb==='number')?cfg.maxStorageGb:9.5;
         var uGb=(typeof cfg.maxUploadGb==='number')?cfg.maxUploadGb:9;
         var fGb=(typeof cfg.freeTierGb==='number')?cfg.freeTierGb:10;
@@ -1236,6 +1514,54 @@ async function shorten(){
         li.onerror=function(){this.style.display='none';};
         bh.insertBefore(li,bh.firstChild);
     }
+})();
+
+// Full-screen drag-and-drop for file uploads — always prevents the browser
+// default (navigating to the dropped file), but only accepts + shows the
+// overlay on the files tab (where the #f input exists). A counter handles
+// nested dragenter/leave events correctly.
+(function initDnd(){
+    if (!('DragEvent' in window)) return;
+    var dragCounter = 0;
+    var getOv = function(){ return document.getElementById('dragOv'); };
+    var onFilesTab = function(){ return !!document.getElementById('f'); };
+    var hasFileTypes = function(dt){
+        if (!dt || !dt.types) return false;
+        for (var i = 0; i < dt.types.length; i++) if (dt.types[i] === 'Files') return true;
+        return false;
+    };
+    window.addEventListener('dragenter', function(e){
+        if (!hasFileTypes(e.dataTransfer)) return;
+        e.preventDefault();
+        dragCounter++;
+        if (!onFilesTab()) return;
+        var ov = getOv(); if (ov) ov.classList.add('active');
+    });
+    window.addEventListener('dragover', function(e){
+        if (!hasFileTypes(e.dataTransfer)) return;
+        e.preventDefault();
+    });
+    window.addEventListener('dragleave', function(e){
+        if (!hasFileTypes(e.dataTransfer)) return;
+        dragCounter = Math.max(0, dragCounter - 1);
+        if (dragCounter === 0) { var ov = getOv(); if (ov) ov.classList.remove('active'); }
+    });
+    window.addEventListener('drop', function(e){
+        if (!hasFileTypes(e.dataTransfer)) return;
+        e.preventDefault();
+        dragCounter = 0;
+        var ov = getOv(); if (ov) ov.classList.remove('active');
+        if (!onFilesTab()) return;
+        var files = e.dataTransfer.files;
+        if (!files || files.length === 0) return;
+        var input = document.getElementById('f');
+        try {
+            var dt = new DataTransfer();
+            dt.items.add(files[0]);
+            input.files = dt.files;
+        } catch (err) { return; }
+        if (typeof showFile === 'function') showFile();
+    });
 })();
 
 function showQR(url){
@@ -1301,8 +1627,33 @@ async function derive(p, s, t) {
     return crypto.subtle.importKey('raw', bytes, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
 }
 
-const genS = () => { const c = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ0123456789!?@"; let p = ""; const r = new Uint32Array(15); crypto.getRandomValues(r); for (let i = 0; i < 15; i++) p += c[r[i] % c.length]; if (get('body')) get('body').value = p; };
-const genK = () => { const c = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789#%&"; let p = ""; const r = new Uint32Array(20); crypto.getRandomValues(r); for (let i = 0; i < 20; i++) p += c[r[i] % c.length]; if (get('pass')) get('pass').value = p; };
+// Unbiased random string generator — rejection samples bytes so the modulo
+// reduction has zero bias (same fix as generateShortId server-side).
+function _randString(alphabet, length) {
+    const n = alphabet.length;
+    const threshold = 256 - (256 % n);
+    const out = [];
+    while (out.length < length) {
+        const buf = crypto.getRandomValues(new Uint8Array(length * 2));
+        for (let i = 0; i < buf.length && out.length < length; i++) {
+            if (buf[i] < threshold) out.push(alphabet[buf[i] % n]);
+        }
+    }
+    return out.join('');
+}
+
+// Alphabet for the body (secret content) — stays broad including punctuation
+// because the body gets AES-encrypted, it never enters a URL.
+const _ALPHA_BODY = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!?@';
+// Alphabet for anything that ends up in a URL fragment (#passphrase for
+// secrets and E2EE files). RFC 3986 unreserved minus visual confusables
+// (0/O/o, 1/l/i/I) — never needs percent-encoding, never clashes with
+// hash, question mark, ampersand or any other reserved separator.
+const _ALPHA_URL_KEY = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789-_~';
+
+const genS  = () => { const v = _randString(_ALPHA_BODY,    15); if (get('body')) get('body').value = v; };
+const genK  = () => { const v = _randString(_ALPHA_URL_KEY, 20); if (get('pass')) get('pass').value = v; };
+const genFK = () => { const v = _randString(_ALPHA_URL_KEY, 20); if (get('fpwd')) get('fpwd').value = v; };
 
 async function processStore() {
     const b = get('body').value, p = get('pass').value, ttl = get('ttl').value;
@@ -1321,50 +1672,125 @@ async function processStore() {
 const CHUNK = 50 * 1024 * 1024;
 const CONCURRENCY = 4;
 
+function onE2eeToggle() {
+    const on = !!(get('fE2ee')||{}).checked;
+    const lbl = get('fpwdLabel'); if (lbl) lbl.innerText = on ? window.L.file_e2ee_label_key : window.L.label_pwd_optional;
+    const inp = get('fpwd'); if (inp) inp.placeholder = on ? window.L.placeholder_key : window.L.placeholder_leave_empty;
+    // Field stays type=text so the user can see what they typed or what the
+    // generator produced — matches the secrets panel UX.
+}
+
 async function upl() {
     const f = get('f').files[0];
     if (!f) return modal(window.L.js_info, window.L.js_select_file);
-    // Client-side pre-flight against the configured per-file cap. Server
-    // re-checks at /api/v1/admin/files/init — this is just faster UX feedback.
-    if (window.__limits && f.size > window.__limits.maxUploadBytes) {
+    const e2ee = !!(get('fE2ee')||{}).checked;
+
+    // E2EE has its own hard 150 MB cap independent of the configurable
+    // server-visible upload cap, because browser AES-GCM is one-shot and
+    // needs plaintext + ciphertext in RAM simultaneously.
+    if (e2ee) {
+        if (f.size > 150 * 1024 * 1024) return modal(window.L.js_error, window.L.js_e2ee_max_size);
+        if (!get('fpwd').value) return modal(window.L.js_error, window.L.js_e2ee_require_pwd);
+    } else if (window.__limits && f.size > window.__limits.maxUploadBytes) {
         return modal(window.L.js_error, window.L.js_file_too_large);
     }
+
     setL(get('btnF'), 1);
     const m = get('fmsg');
     m.innerText = window.L.js_initializing;
-    try {
-        const init = await (await fetch('/api/v1/admin/files/init', { method: 'POST', body: JSON.stringify({ filename: f.name, size: f.size, password: get('fpwd').value, ttl: parseInt(get('fttl').value), limit: parseInt(get('flimit').value) }) })).json();
-        if(init.error) throw new Error(init.error);
 
-        const tot = Math.ceil(f.size / CHUNK);
+    try {
+        let init, source, total, fileId, passphrase;
+
+        if (e2ee) {
+            passphrase = get('fpwd').value;
+            fileId = crypto.randomUUID();
+            m.innerText = window.L.js_e2ee_encrypting;
+
+            // derive() is the same function the secret flow uses — reusing it
+            // keeps the Argon2id params in one place (ARGON2_PARAMS).
+            const verifier = await derive(passphrase, fileId, 'v');
+            const key      = await derive(passphrase, fileId, 'k');
+
+            const iv = crypto.getRandomValues(new Uint8Array(12));
+            const plaintext = await f.arrayBuffer();
+            const ctBuf = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plaintext);
+            const ct = new Uint8Array(ctBuf);
+
+            // Prepend IV to ciphertext — one blob uploaded, recipient peels
+            // the first 12 bytes off to decrypt.
+            source = new Uint8Array(12 + ct.length);
+            source.set(iv, 0);
+            source.set(ct, 12);
+            total = source.length;
+
+            const initRes = await fetch('/api/v1/admin/files/init', { method: 'POST', body: JSON.stringify({
+                id: fileId,
+                filename: f.name,
+                size: total,
+                encrypted: true,
+                verifier,
+                algoVersion: 'argon2id-v1',
+                ttl: parseInt(get('fttl').value),
+                limit: parseInt(get('flimit').value),
+            })});
+            init = await initRes.json();
+            if (init.error) throw new Error(init.error);
+        } else {
+            const initRes = await fetch('/api/v1/admin/files/init', { method: 'POST', body: JSON.stringify({
+                filename: f.name,
+                size: f.size,
+                password: get('fpwd').value,
+                ttl: parseInt(get('fttl').value),
+                limit: parseInt(get('flimit').value),
+            })});
+            init = await initRes.json();
+            if (init.error) throw new Error(init.error);
+            source = f;
+            total = f.size;
+            fileId = init.fileId;
+        }
+
+        const tot = Math.ceil(total / CHUNK);
         let completed = 0;
         const parts = new Array(tot);
         const queue = [];
         for (let i = 0; i < tot; i++) queue.push(i);
 
+        const sliceChunk = (start, end) => {
+            if (source instanceof Uint8Array) return new Blob([source.subarray(start, end)]);
+            return source.slice(start, end);
+        };
+
         const worker = async () => {
             while (queue.length > 0) {
                 const i = queue.shift();
-                const chunk = f.slice(i * CHUNK, Math.min((i + 1) * CHUNK, f.size));
+                const chunk = sliceChunk(i * CHUNK, Math.min((i + 1) * CHUNK, total));
                 const res = await fetch('/api/v1/admin/files/part?key=' + init.key + '&id=' + init.uploadId + '&num=' + (i + 1), { method: 'PUT', body: chunk });
-                if(!res.ok) throw new Error('Part failed');
-                const partData = await res.json();
-                parts[i] = partData;
+                if (!res.ok) throw new Error('Part failed');
+                parts[i] = await res.json();
                 completed++;
                 m.innerText = window.L.js_uploading + Math.round((completed / tot) * 100) + '%';
             }
         };
 
         const threads = [];
-        for(let t=0; t < CONCURRENCY; t++) threads.push(worker());
+        for (let t = 0; t < CONCURRENCY; t++) threads.push(worker());
         await Promise.all(threads);
 
         await fetch('/api/v1/admin/files/complete', { method: 'POST', body: JSON.stringify({ key: init.key, uploadId: init.uploadId, parts: parts, fileId: init.fileId }) });
         m.innerText = window.L.js_done;
         get('f-res').classList.remove('hidden');
+
         const base = location.origin + '/share/' + init.fileId;
         get('flinkS').value = base;
-        if (get('fpwd').value) {
+        if (e2ee) {
+            // For E2EE we return a link with the passphrase in the URL fragment —
+            // browsers never send fragments to the server, so the key material
+            // stays strictly client-side.
+            get('f-auto-row').classList.remove('hidden');
+            get('flinkE').value = base + '#' + encodeURIComponent(passphrase);
+        } else if (get('fpwd').value) {
             get('f-auto-row').classList.remove('hidden');
             get('flinkE').value = base + '?pwd=' + encodeURIComponent(get('fpwd').value);
         }
@@ -1373,7 +1799,72 @@ async function upl() {
         get('dtxt').parentNode.style.backgroundColor = 'var(--surface-2)';
         get('dtxt').parentNode.style.borderColor = 'var(--border-strong)';
         loadS();
-    } catch (e) { m.innerText = window.L.js_error_prefix + e.message; } finally { setL(get('btnF'), 0); }
+    } catch (e) { m.innerText = window.L.js_error_prefix + (e && e.message ? e.message : 'error'); } finally { setL(get('btnF'), 0); }
+}
+
+// E2EE download — on /share/:id for encrypted files. Fetches the ciphertext
+// blob, peels the 12-byte IV prefix, derives the AES key client-side and
+// decrypts. Triggers a normal browser download via an object URL; the plaintext
+// never reaches the server.
+async function e2eeUnlock() {
+    const pwd = get('recvP').value;
+    if (!pwd) return modal(window.L.js_error, window.L.js_nopass);
+    setL(get('btnE2ee'), 1);
+    const msg = get('e2eeMsg'); msg.style.display = 'block';
+    try {
+        const id = window.__fileId;
+        msg.innerText = window.L.js_e2ee_preparing;
+        const verifier = await derive(pwd, id, 'v');
+
+        const payload = { verifierCandidate: verifier };
+        if (window.__tsRequired && _tsToken) payload.cfTurnstileToken = _tsToken;
+
+        msg.innerText = window.L.js_e2ee_downloading;
+        const res = await fetch('/api/v1/public/files/' + id + '/retrieve-ciphertext', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error(err.error || ('HTTP ' + res.status));
+        }
+
+        // Stream body with simple progress indicator — Content-Length is set
+        // by the Worker via R2's writeHttpMetadata, so we can show a %.
+        const totalHeader = res.headers.get('Content-Length');
+        const total = totalHeader ? parseInt(totalHeader, 10) : 0;
+        const reader = res.body.getReader();
+        const chunks = [];
+        let received = 0;
+        while (true) {
+            const r = await reader.read();
+            if (r.done) break;
+            chunks.push(r.value);
+            received += r.value.length;
+            if (total) msg.innerText = window.L.js_e2ee_downloading + ' ' + Math.round((received / total) * 100) + '%';
+        }
+        const blob = new Uint8Array(received);
+        let off = 0; for (const c of chunks) { blob.set(c, off); off += c.length; }
+
+        msg.innerText = window.L.js_e2ee_decrypting;
+        const iv  = blob.subarray(0, 12);
+        const ct  = blob.subarray(12);
+        const key = await derive(pwd, id, 'k');
+        const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct);
+
+        const url = URL.createObjectURL(new Blob([plaintext]));
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = window.__fileName || 'download';
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        setTimeout(function(){ URL.revokeObjectURL(url); }, 10000);
+        msg.innerText = window.L.js_done;
+    } catch (e) {
+        modal(window.L.js_error, window.L.js_e2ee_decrypt_failed + ' (' + (e && e.message ? e.message : 'unknown') + ')');
+        msg.innerText = '';
+        msg.style.display = 'none';
+    } finally { setL(get('btnE2ee'), 0); }
 }
 
 async function loadS() {
@@ -1388,7 +1879,8 @@ async function loadS() {
         get('st_txt').innerText = window.L.js_used + (d.used / GiB).toFixed(2) + ' GB / ' + (d.limit / GiB).toFixed(2) + ' GB';
         get('tbl').innerHTML = d.files.map(f => {
             const lim = f.max_downloads === -1 ? '\u221e' : f.max_downloads;
-            return '<tr><td>' + escapeHtml(f.filename) + '</td><td>' + (f.size / 1e6).toFixed(1) + 'MB</td><td style="color:var(--text-muted)">' + window.L.js_downloads + f.download_count + '/' + lim + '</td><td style="text-align:right"><button class="btn-del" onclick="del(\\'' + f.id + '\\')">' + window.L.js_btn_delete + '</button></td></tr>';
+            const lock = f.encrypted ? '<span title="' + escapeHtml(window.L.file_list_encrypted) + '" style="color:var(--accent); margin-right:6px" aria-label="E2EE">\u{1F512}</span>' : '';
+            return '<tr><td>' + lock + escapeHtml(f.filename) + '</td><td>' + (f.size / 1e6).toFixed(1) + 'MB</td><td style="color:var(--text-muted)">' + window.L.js_downloads + f.download_count + '/' + lim + '</td><td style="text-align:right"><button class="btn-del" onclick="del(\\'' + f.id + '\\')">' + window.L.js_btn_delete + '</button></td></tr>';
         }).join('');
     } catch (e) { }
 }
@@ -1468,11 +1960,10 @@ if (location.hash.length > 1 && get('btnA')) {
     if (!get('tsWidget')) get('btnA').classList.remove('hidden');
 }
 ${LANG_PICKER_JS}
-</script>
 `
 
 const BASE_HTML = (body: string, langCode: LangCode = 'en', langPickerHtml: string = '', tailScript: string = ''): string =>
-  `<!DOCTYPE html><html lang="${langCode}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Edge Secrets</title><style>${CSS}</style></head><body><button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" title="Toggle theme">\u2600</button>${langPickerHtml}${body}<div class="overlay" id="qrOv" onclick="if(event.target===this)this.style.display='none'" style="display:none"><div class="modal" style="max-width:280px;padding:28px"><h3 style="margin-bottom:18px" id="qrTitle"></h3><img id="qrImg" class="qr-modal-img" alt="QR Code" src=""><p id="qrTxt" style="font-size:0.6rem;word-break:break-all;color:var(--text-muted);margin-bottom:18px;text-align:center;line-height:1.5"></p><button class="modal-btn" onclick="get('qrOv').style.display='none'" id="qrCloseBtn"></button></div></div>${CLIENT_JS}${tailScript}</body></html>`
+  `<!DOCTYPE html><html lang="${langCode}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Edge Secrets</title><style>${CSS}</style></head><body><button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" title="Toggle theme">\u2600</button>${langPickerHtml}${body}<div class="overlay" id="qrOv" onclick="if(event.target===this)this.style.display='none'" style="display:none"><div class="modal" style="max-width:280px;padding:28px"><h3 style="margin-bottom:18px" id="qrTitle"></h3><img id="qrImg" class="qr-modal-img" alt="QR Code" src=""><p id="qrTxt" style="font-size:0.6rem;word-break:break-all;color:var(--text-muted);margin-bottom:18px;text-align:center;line-height:1.5"></p><button class="modal-btn" onclick="get('qrOv').style.display='none'" id="qrCloseBtn"></button></div></div><script src="/ui/app.v1.js" defer></script>${tailScript}</body></html>`
 
 function renderGen(type: string, t: Translations, langCode: LangCode): string {
   const isLink = type === 'link'
@@ -1480,7 +1971,7 @@ function renderGen(type: string, t: Translations, langCode: LangCode): string {
   const isCred = !isLink && !isFile
   const lp = renderLangPicker(langCode)
   const body = `
-  <script>window.L = ${JSON.stringify(t)}; window.__algo = ${JSON.stringify(CURRENT_ALGO)};</script>
+  <script>window.L = ${jsonEmbed(t)}; window.__algo = ${jsonEmbed(CURRENT_ALGO)};</script>
   <script src="/ui/argon2.v1.js"></script>
   <div class="card">
       <div class="brand-header"><span class="brand-logo" id="brandName">EDGE SECRETS</span><p class="brand-tagline" id="brandTagline" style="display:none"></p></div>
@@ -1518,7 +2009,15 @@ function renderGen(type: string, t: Translations, langCode: LangCode): string {
               </div>
           </div>
           <input type="file" id="f" style="display:none" onchange="showFile()">
-          <div class="label-row">${t.label_pwd_optional}</div>
+          <div id="dragOv" class="drag-overlay" aria-hidden="true">
+              <div class="drag-overlay-inner">${t.file_drop_here}</div>
+          </div>
+          <div class="ts-toggle-row" style="margin-top:14px; margin-bottom:4px">
+              <span class="cfg-label">${t.file_toggle_e2ee}</span>
+              <label class="ts-toggle"><input type="checkbox" id="fE2ee" onchange="onE2eeToggle()"><span class="ts-track"></span><span class="ts-thumb"></span></label>
+          </div>
+          <div style="font-size:0.6rem; color:var(--text-muted); line-height:1.5; margin-bottom:12px">${t.file_e2ee_hint}</div>
+          <div class="label-row"><span id="fpwdLabel">${t.label_pwd_optional}</span><span class="action-link" onclick="genFK()">${t.action_gen_key}</span></div>
           <input type="text" id="fpwd" placeholder="${t.placeholder_leave_empty}">
           <div style="display:flex; gap:15px">
               <div style="flex:1"><div class="label-row">${t.label_retention}</div><select id="fttl"><option value="43200000">${t.ttl_12h}</option><option value="172800000" selected>${t.ttl_2d}</option><option value="604800000">${t.ttl_7d}</option></select></div>
@@ -1634,6 +2133,10 @@ function renderGen(type: string, t: Translations, langCode: LangCode): string {
         <span class="cfg-label">${t.cfg_turnstile_files}</span>
         <label class="ts-toggle"><input type="checkbox" id="cfgTsFiles"><span class="ts-track"></span><span class="ts-thumb"></span></label>
       </div>
+      <div class="ts-toggle-row" style="margin-top:6px">
+        <span class="cfg-label">${t.cfg_turnstile_files_e2ee}</span>
+        <label class="ts-toggle"><input type="checkbox" id="cfgTsFilesE2ee"><span class="ts-track"></span><span class="ts-thumb"></span></label>
+      </div>
     </div>
     <div class="cfg-divider"></div>
     <div class="cfg-section">
@@ -1675,7 +2178,7 @@ function renderReceiveCred(_id: string, lang: Lang, langCode: LangCode, turnstil
     ? `<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>`
     : ''
   const body = `
-  <script>window.L = ${JSON.stringify(lang)}; window.__algo = ${JSON.stringify(algoVersion)};</script>
+  <script>window.L = ${jsonEmbed(lang)}; window.__algo = ${jsonEmbed(algoVersion)};</script>
   <script src="/ui/argon2.v1.js"></script>
   <div class="card">
     <div class="brand-header"><span class="brand-logo">EDGE SECRETS</span></div>
@@ -1703,11 +2206,67 @@ function renderReceiveCred(_id: string, lang: Lang, langCode: LangCode, turnstil
   return BASE_HTML(body, langCode, lp, tsScript)
 }
 
+function renderReceiveFileE2EE(
+  id: string,
+  filename: string,
+  lang: Lang,
+  langCode: LangCode,
+  turnstileSiteKey: string | null
+): string {
+  const safeName = escapeHtml(filename) as string
+  const lp = renderLangPicker(langCode)
+  const tsWidget = turnstileSiteKey
+    ? `<div id="tsWidget" class="ts-verify-wrap"><span class="ts-verify-label">${lang.ts_verify}</span><div class="cf-turnstile" data-sitekey="${escapeHtml(turnstileSiteKey)}" data-callback="onTurnstileSuccess" data-theme="auto"></div></div>`
+    : ''
+  const tsScript = turnstileSiteKey
+    ? `<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>`
+    : ''
+  const body = `
+  <script>
+    window.L = ${jsonEmbed(lang)};
+    window.__algo = 'argon2id-v1';
+    window.__fileId = ${jsonEmbed(id)};
+    window.__fileName = ${jsonEmbed(filename)};
+    window.__tsRequired = ${turnstileSiteKey ? 'true' : 'false'};
+  </script>
+  <script src="/ui/argon2.v1.js"></script>
+  <div class="card">
+    <div class="brand-header"><span class="brand-logo" id="brandName">EDGE SECRETS</span><p class="brand-tagline" id="brandTagline" style="display:none"></p></div>
+    <h2 style="text-align:center; font-size:1.1rem; margin-bottom:20px; color:var(--text); font-weight:600; letter-spacing:0.04em;">${lang.file_e2ee_protected}</h2>
+    <div style="text-align:center; padding: 10px 0 20px;">
+      <div style="font-size:3rem; margin-bottom:10px;">\u{1F510}</div>
+      <h2 style="border:none; margin:0; font-size:1.15rem; word-break: break-all; font-weight:600; color:var(--text)">${safeName}</h2>
+    </div>
+    <div id="m-manual">
+      <div class="label-row">${lang.file_e2ee_label_key}</div>
+      <input type="password" id="recvP" placeholder="${lang.placeholder_key}">
+    </div>
+    ${tsWidget}
+    <button class="btn${turnstileSiteKey ? ' hidden' : ''}" onclick="e2eeUnlock()" id="btnE2ee"><span>${lang.file_e2ee_btn_decrypt}</span><div class="spinner"></div></button>
+    <div id="e2eeMsg" style="margin-top:14px; text-align:center; font-size:0.8rem; color:var(--text-muted); display:none"></div>
+  </div>
+  <div id="ov" class="overlay"><div class="modal"><h3 id="mT"></h3><p id="mMsg"></p><button class="modal-btn" onclick="get('ov').style.display='none'">OK</button></div></div>
+  <script>
+    // If the share URL carries a #fragment (fast-link flow), pre-fill the
+    // passphrase input. The fragment is strictly client-side — browsers
+    // never include it in outgoing requests.
+    (function(){
+      if (!location.hash || location.hash.length < 2) return;
+      try {
+        var v = decodeURIComponent(location.hash.slice(1));
+        var inp = document.getElementById('recvP');
+        if (inp) inp.value = v;
+      } catch(e) {}
+    })();
+  </script>`
+  return BASE_HTML(body, langCode, lp, tsScript)
+}
+
 function renderReceiveFile(filename: string, lang: Lang, langCode: LangCode): string {
   const safeName = escapeHtml(filename) as string
   const lp = renderLangPicker(langCode)
   const body = `
-  <script>window.L = ${JSON.stringify(lang)};</script>
+  <script>window.L = ${jsonEmbed(lang)};</script>
   <div class="card">
       <div class="brand-header"><span class="brand-logo" id="brandName">EDGE SECRETS</span><p class="brand-tagline" id="brandTagline" style="display:none"></p></div>
       <h2 style="text-align:center; font-size:1.1rem; margin-bottom:24px; color:var(--text); font-weight:600; letter-spacing:0.04em;">${lang.title_file}</h2>
@@ -1742,7 +2301,7 @@ function renderFileTurnstileGate(
   const tailScript = `
   <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" defer></script>`
   const body = `
-  <script>window.L = ${JSON.stringify(lang)};</script>
+  <script>window.L = ${jsonEmbed(lang)};</script>
   <div class="card">
       <div class="brand-header"><span class="brand-logo" id="brandName">EDGE SECRETS</span><p class="brand-tagline" id="brandTagline" style="display:none"></p></div>
       <h2 style="text-align:center; font-size:1.1rem; margin-bottom:24px; color:var(--text); font-weight:600; letter-spacing:0.04em;">${lang.title_file}</h2>
@@ -1759,6 +2318,21 @@ function renderFileTurnstileGate(
           ${passwordField}
           <button class="btn" id="btnDl" style="margin-top:14px" ${hasPassword ? 'disabled' : ''}><span>${lang.btn_unlock}</span></button>
       </form>
-  </div><div id="ov" class="overlay"><div class="modal"><h3 id="mT"></h3><p id="mMsg"></p><button class="modal-btn" onclick="get('ov').style.display='none'">OK</button></div></div>`
+  </div><div id="ov" class="overlay"><div class="modal"><h3 id="mT"></h3><p id="mMsg"></p><button class="modal-btn" onclick="get('ov').style.display='none'">OK</button></div></div>
+  <script>
+    // Fast-link autofill: /share/:id?pwd=X embeds the password in the query
+    // string. When Turnstile is inactive the server handles pwd server-side
+    // and streams the file; when Turnstile is active we render this gate
+    // instead and the pwd would otherwise be lost. Lift it from the URL into
+    // the form field, then scrub it from the address bar so it doesn't sit
+    // there in plain view while the user solves the challenge.
+    (function(){
+      var q = new URL(location.href).searchParams.get('pwd');
+      if (!q) return;
+      var el = document.getElementById('p');
+      if (el) el.value = q;
+      try { history.replaceState({}, '', location.pathname); } catch(e) {}
+    })();
+  </script>`
   return BASE_HTML(body, langCode, lp, tailScript)
 }
