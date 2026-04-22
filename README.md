@@ -253,6 +253,21 @@ Every release goes through the layered toolchain below before it is cut. Finding
 
 Audit scripts and detailed findings live locally (not in the repo) — reach out if you want the artefacts for a specific release.
 
+#### v2.0 results
+
+| Layer | Findings | Outcome |
+|---|---|---|
+| Snyk Open Source | 0 | — |
+| Snyk Code | 0 | — |
+| Semgrep | 1 | False positive on the language picker (server-generated HTML from a fixed enum); suppressed |
+| Claude Opus architectural review | 5 | All fixed before release: XSS via filename in inline script, non-E2EE password-hash salt absence, TTL slide on failed verifier attempts, failed-attempts counter race, upload size declared-vs-actual mismatch |
+| OWASP ZAP 2.17.0 | 1 | `Strict-Transport-Security` missing on `text/plain` 404 responses; fixed by the baseline-headers middleware shipped in this release |
+| Nuclei 3.8.0 | 0 | — |
+| CSP directive audit | 0 | — |
+| Header & invariant suite | 0 | — |
+
+All CSP / cookie / header findings reported against `/` or `/robots.txt` by the DAST tools originate from the Cloudflare Access challenge page that the Worker redirects unauthenticated admin traffic to. They are out of scope for this release.
+
 ---
 
 ## Architecture
