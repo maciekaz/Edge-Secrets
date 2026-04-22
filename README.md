@@ -13,7 +13,7 @@ Secure, one-time sharing of passwords, files and links - built on Cloudflare Wor
 
 | Feature | Details |
 |---|---|
-| **Text secrets** | Zero-knowledge credential sharing - AES-256-GCM, Argon2id key derivation (OWASP 2023), passphrase in URL hash, burn-on-read |
+| **Text secrets** | Zero-knowledge credential sharing - AES-256-GCM, Argon2id key derivation, passphrase in URL hash, burn-on-read |
 | **File sharing** | R2-backed, per-file and total caps admin-configurable in Appearance (defaults 9 GB / 9.5 GB, hard ceiling 50 GB), optional password, download limit, server-enforced TTL |
 | **E2EE file sharing** | Opt-in client-side AES-GCM + Argon2id for files up to 150 MiB. Server stores ciphertext only; passphrase travels in the URL fragment (or out-of-band) and never hits the server |
 | **URL shortener** | Short links with TTL and click limit, SSRF-safe, unbiased ID generation |
@@ -111,7 +111,7 @@ sequenceDiagram
 
 | Element | Algorithm | Parameters |
 |---|---|---|
-| Key derivation | Argon2id | m=19 MiB, t=2, p=1, 32-byte output (OWASP 2023 minimum) |
+| Key derivation | Argon2id | m=19 MiB, t=2, p=1, 32-byte output |
 | Encryption | AES-GCM | 256-bit, random IV (12 B) |
 | Password verifier | Argon2id | Same params, salt `id + "_v"` |
 | Link entropy (with passphrase) | 20-char key, 58-char alphabet | ~118 bits |
@@ -203,7 +203,7 @@ sequenceDiagram
 
 | Element | Algorithm | Parameters |
 |---|---|---|
-| Key derivation | Argon2id | m=19 MiB, t=2, p=1, 32-byte output (OWASP 2023 minimum) |
+| Key derivation | Argon2id | m=19 MiB, t=2, p=1, 32-byte output |
 | Salt | File UUID (for AES key) / UUID + `"_v"` (for verifier) | 36 bytes |
 | Encryption | AES-GCM | 256-bit, random 12-byte IV prepended to the ciphertext blob |
 | Verifier | Argon2id output, 32 bytes | Stored base64 in D1, checked via `safeCompare` |

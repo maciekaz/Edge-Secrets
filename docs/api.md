@@ -49,7 +49,7 @@ Store an encrypted secret in KV.
 
 The server stores only ciphertext — **all encryption must happen client-side** before calling this endpoint. The passphrase never leaves the caller; it is embedded in the share URL fragment (`#passphrase`) which browsers never send to the server.
 
-Key derivation uses **Argon2id** (OWASP 2023 minimum: m=19 MiB, t=2, p=1, 32-byte output). Both the AES-GCM encryption key and the server-side verifier are derived from the same passphrase with different salts (`id` and `id + "_v"` respectively). `hash-wasm` is the reference implementation the server ships; any Argon2id library with the same parameters will produce identical output.
+Key derivation uses **Argon2id** (m=19 MiB, t=2, p=1, 32-byte output). Both the AES-GCM encryption key and the server-side verifier are derived from the same passphrase with different salts (`id` and `id + "_v"` respectively). `hash-wasm` is the reference implementation the server ships; any Argon2id library with the same parameters will produce identical output.
 
 ```js
 import { argon2id } from 'hash-wasm'

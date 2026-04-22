@@ -32,7 +32,7 @@ const CONFIG = {
 // Key-derivation algorithm label stored with each secret. Single-value union
 // for now; kept as a union type so a future `argon2id-v2` (e.g. stronger
 // params) can be added without reshaping the KV metadata schema.
-// `argon2id-v1` uses OWASP 2023 minimums: m=19456 KiB, t=2, p=1, 32-byte output.
+// `argon2id-v1` uses m=19456 KiB, t=2, p=1, 32-byte output.
 type AlgoVersion = 'argon2id-v1'
 const CURRENT_ALGO: AlgoVersion = 'argon2id-v1'
 
@@ -1675,9 +1675,9 @@ function showFile() {
     }
 }
 
-// OWASP 2023 Argon2id minimum — m=19 MiB, t=2, p=1, 32-byte output.
+// Argon2id parameters — m=19 MiB, t=2, p=1, 32-byte output.
 // Chosen so a modern laptop derives a key in ~300-500ms and mid-range mobile
-// stays under ~3s. Do not lower without re-checking OWASP guidance.
+// stays under ~3s. Do not lower without re-benchmarking.
 const ARGON2_PARAMS = { memorySize: 19456, iterations: 2, parallelism: 1, hashLength: 32 };
 
 // hash-wasm is loaded via /ui/argon2.v1.js and attaches itself to window.hashwasm.
