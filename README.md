@@ -15,7 +15,7 @@ Secure, one-time sharing of passwords, files and links - built on Cloudflare Wor
 |---|---|
 | **Text secrets** | Zero-knowledge credential sharing - AES-256-GCM, Argon2id key derivation (OWASP 2023), passphrase in URL hash, burn-on-read |
 | **File sharing** | R2-backed, per-file and total caps admin-configurable in Appearance (defaults 9 GB / 9.5 GB, hard ceiling 50 GB), optional password, download limit, server-enforced TTL |
-| **🆕 E2EE file sharing** | Opt-in client-side AES-GCM + Argon2id for files up to 150 MiB. Server stores ciphertext only; passphrase travels in the URL fragment (or out-of-band) and never hits the server |
+| **E2EE file sharing** | Opt-in client-side AES-GCM + Argon2id for files up to 150 MiB. Server stores ciphertext only; passphrase travels in the URL fragment (or out-of-band) and never hits the server |
 | **URL shortener** | Short links with TTL and click limit, SSRF-safe, unbiased ID generation |
 | **Appearance editor** | Accent colour, background colour, brand name, tagline, logo, storage limits - all globally persistent |
 | **Dark / light mode** | System-detected per client, manually overridable |
@@ -291,7 +291,7 @@ flowchart TD
 
 API endpoints are grouped under `/api/v1/` in two zones. Cloudflare Access needs only **two rules**: `/gen` and `/api/v1/admin/*`.
 
-### Admin Zone - `/api/v1/admin/` (🔒 CF Access)
+### Admin Zone - `/api/v1/admin/` (CF Access)
 
 | Method | Path | Description |
 |---|---|---|
