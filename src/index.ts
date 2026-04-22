@@ -1366,8 +1366,13 @@ ${LANG_PICKER_CSS}
 .ts-toggle input:checked+.ts-track{background:var(--accent)}
 .ts-thumb{position:absolute;top:3px;left:3px;width:14px;height:14px;background:#fff;border-radius:50%;transition:transform 0.2s;pointer-events:none}
 .ts-toggle input:checked~.ts-thumb{transform:translateX(16px)}
-.ts-verify-wrap{text-align:center;padding:20px 0 10px}
-.ts-verify-label{font-size:0.65rem;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;color:var(--text-muted);margin-bottom:16px;display:block}`
+.ts-verify-wrap{text-align:center;padding:20px 0 10px;overflow-x:auto;-webkit-overflow-scrolling:touch}
+.ts-verify-label{font-size:0.65rem;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;color:var(--text-muted);margin-bottom:16px;display:block}
+/* Narrow viewports: Turnstile iframe is a fixed ~300px wide box rendered by
+   Cloudflare, so the card padding has to shrink below iPhone-SE width
+   (375px) or the widget pushes out on the right edge. overflow-x:auto on
+   .ts-verify-wrap is a safety net for anything narrower than 320px. */
+@media (max-width:480px){.card{padding:24px 18px}}`
 
 // Pure JS body — served externally at /ui/app.v1.js so we can start pulling
 // `'unsafe-inline'` out of the script-src CSP. Still referenced by every
@@ -1955,7 +1960,7 @@ async function loadS() {
         get('st_txt').innerText = window.L.js_used + (d.used / GiB).toFixed(2) + ' GB / ' + (d.limit / GiB).toFixed(2) + ' GB';
         get('tbl').innerHTML = d.files.map(f => {
             const lim = f.max_downloads === -1 ? '\u221e' : f.max_downloads;
-            const lock = f.encrypted ? '<span title="' + escapeHtml(window.L.file_list_encrypted) + '" style="color:var(--accent); margin-right:6px" aria-label="E2EE">\u{1F512}</span>' : '';
+            const lock = f.encrypted ? '<span title="' + escapeHtml(window.L.file_list_encrypted) + '" style="display:inline-block;vertical-align:-1px;margin-right:6px;color:var(--text-muted);opacity:0.75" aria-label="E2EE"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></span>' : '';
             return '<tr><td>' + lock + escapeHtml(f.filename) + '</td><td>' + (f.size / 1e6).toFixed(1) + 'MB</td><td style="color:var(--text-muted)">' + window.L.js_downloads + f.download_count + '/' + lim + '</td><td style="text-align:right"><button class="btn-del" data-click="del" data-id="' + f.id + '">' + window.L.js_btn_delete + '</button></td></tr>';
         }).join('');
     } catch (e) { }
@@ -2010,11 +2015,16 @@ var _autoMode = false;
 function onTurnstileSuccess(token) {
   _tsToken = token;
   var w = get('tsWidget'); if (w) w.style.display = 'none';
+  // Whichever page is rendering the Turnstile widget needs its gated button
+  // revealed on challenge solve. Secret retrieval has btnM / btnA (manual /
+  // auto-unlock), E2EE file retrieval has btnE2ee. Un-hide every one that
+  // exists on the current page.
   if (_autoMode) {
     var btnA = get('btnA'); if (btnA) btnA.classList.remove('hidden');
   } else {
     var btnM = get('btnM'); if (btnM) btnM.classList.remove('hidden');
   }
+  var btnE2ee = get('btnE2ee'); if (btnE2ee) btnE2ee.classList.remove('hidden');
 }
 function onTsFile(token) {
   var btn = get('btnDl');
@@ -2349,7 +2359,7 @@ function renderReceiveCred(_id: string, lang: Lang, langCode: LangCode, turnstil
     ? `<div id="tsWidget" class="ts-verify-wrap"><span class="ts-verify-label">${lang.ts_verify}</span><div class="cf-turnstile" data-sitekey="${escapeHtml(turnstileSiteKey)}" data-callback="onTurnstileSuccess" data-theme="auto"></div></div>`
     : ''
   const tsScript = turnstileSiteKey
-    ? `<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>`
+    ? `<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" defer></script>`
     : ''
   const body = `
   <script type="application/json" id="__ctx__">${jsonEmbed({ L: lang, algo: algoVersion })}</script>
@@ -2393,7 +2403,7 @@ function renderReceiveFileE2EE(
     ? `<div id="tsWidget" class="ts-verify-wrap"><span class="ts-verify-label">${lang.ts_verify}</span><div class="cf-turnstile" data-sitekey="${escapeHtml(turnstileSiteKey)}" data-callback="onTurnstileSuccess" data-theme="auto"></div></div>`
     : ''
   const tsScript = turnstileSiteKey
-    ? `<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>`
+    ? `<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" defer></script>`
     : ''
   const body = `
   <script type="application/json" id="__ctx__">${jsonEmbed({
@@ -2408,7 +2418,7 @@ function renderReceiveFileE2EE(
     <div class="brand-header"><span class="brand-logo" id="brandName">EDGE SECRETS</span><p class="brand-tagline" id="brandTagline" style="display:none"></p></div>
     <h2 style="text-align:center; font-size:1.1rem; margin-bottom:20px; color:var(--text); font-weight:600; letter-spacing:0.04em;">${lang.file_e2ee_protected}</h2>
     <div style="text-align:center; padding: 10px 0 20px;">
-      <div style="font-size:3rem; margin-bottom:10px;">\u{1F510}</div>
+      <div style="margin-bottom:12px; display:flex; justify-content:center; color:var(--text); opacity:0.65"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
       <h2 style="border:none; margin:0; font-size:1.15rem; word-break: break-all; font-weight:600; color:var(--text)">${safeName}</h2>
     </div>
     <div id="m-manual">
