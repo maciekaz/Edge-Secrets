@@ -486,7 +486,7 @@ These routes are HTML pages or static assets and must remain outside CF Access:
 | `GET` | `/ui/logo` | Brand logo from R2 |
 | `GET` | `/ui/qr` | Server-rendered SVG QR code (`?d=encodedUrl`) |
 | `GET` | `/ui/argon2.v1.js` | Bundled hash-wasm Argon2id module. `immutable` cached; same-origin delivery so no external CDN enters the CSP. Bump the version suffix (`v1` → `v2`) when swapping implementations |
-| `GET` | `/ui/app.v1.js` | Main client application bundle (`const`s, event handlers, `derive`, upload/decrypt pipelines, …). Served with `Cache-Control: public, max-age=60` so deploys propagate within a minute. Bump the version suffix if a breaking change requires immediate cache invalidation |
+| `GET` | `/ui/app.v1.js` | Main client application bundle — **the only executable script on any page**. Contains the JSON-island reader, crypto helpers (`derive`, upload / decrypt pipelines), all form handlers, and the global event delegator that dispatches `data-click` / `data-change` / `data-input` / `data-submit` attributes to named actions. Served with `Cache-Control: public, max-age=60` so deploys propagate within a minute. Bump the version suffix if a breaking change requires immediate cache invalidation |
 
 ---
 

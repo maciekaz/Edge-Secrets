@@ -119,7 +119,7 @@ interface UploadCompleteBody {
 const HTML_SECURITY_HEADERS: Record<string, string> = {
   'Content-Type': 'text/html;charset=UTF-8',
   'Content-Security-Policy':
-    "default-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data:; connect-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests;",
+    "default-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com; script-src 'self' 'wasm-unsafe-eval' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data:; connect-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests;",
   // HSTS — 1 year, include subdomains, and opt-in to browser preload lists.
   // Requires the site to always be HTTPS-reachable for the max-age window.
   'Strict-Transport-Security': 'max-age=31536000; includeSubDomains; preload',
@@ -1354,6 +1354,25 @@ ${LANG_PICKER_CSS}
 // `'unsafe-inline'` out of the script-src CSP. Still referenced by every
 // page via a <script src=...> tag in BASE_HTML.
 const CLIENT_JS_BODY = `
+// Page context is embedded by the server as a <script type="application/json">
+// data island — the browser stores it as text but does not execute, so CSP
+// can reject inline script entirely without losing the per-page data (lang
+// dictionary, algoVersion, E2EE file metadata, …). Anything that used to
+// live in a "window.L = {...}" inline script is pulled out here once, then
+// the rest of the bundle reads from the real window.* globals as before.
+(function(){
+    var el = document.getElementById('__ctx__');
+    if (!el) return;
+    try {
+        var ctx = JSON.parse(el.textContent);
+        if (ctx.L)         window.L           = ctx.L;
+        if (ctx.algo)      window.__algo      = ctx.algo;
+        if (ctx.fileId)    window.__fileId    = ctx.fileId;
+        if (ctx.fileName)  window.__fileName  = ctx.fileName;
+        if (typeof ctx.tsRequired === 'boolean') window.__tsRequired = ctx.tsRequired;
+    } catch (e) {}
+})();
+
 const get = (id) => document.getElementById(id);
 const modal = (t, m) => { get('mT').innerText = t; get('mMsg').innerText = m; get('ov').style.display = 'flex'; };
 const setL = (btn, s) => { if (btn) { btn.disabled = s; const sp = btn.querySelector('.spinner'); if (sp) sp.style.display = s ? 'block' : 'none'; } };
@@ -1513,6 +1532,44 @@ async function shorten(){
         li.onload=function(){this.style.display='block';var st=get('logoStatus');if(st)st.textContent=window.L.js_logo_active;};
         li.onerror=function(){this.style.display='none';};
         bh.insertBefore(li,bh.firstChild);
+    }
+
+    // Logo preview in the Appearance config panel — replaces the inline
+    // onload/onerror attributes on the <img> tag so CSP can drop
+    // 'unsafe-inline'. The initial state may already be resolved by the
+    // time this runs (defer means the script fires after DOM parse but
+    // the <img> may have finished loading before that), so reconcile
+    // manually with .complete / .naturalWidth.
+    var lp=get('logoPreview');
+    if(lp){
+        lp.onload=function(){this.style.display='inline-block';};
+        lp.onerror=function(){this.style.display='none';};
+        if(lp.complete){
+            if(lp.naturalWidth>0) lp.style.display='inline-block';
+            else lp.style.display='none';
+        }
+    }
+
+    // E2EE receive page (/share/:id for encrypted files): if the share URL
+    // carries a #fragment (fast-link flow), pre-fill the passphrase input.
+    // Browsers never send the fragment to the server — it stays strictly
+    // client-side.
+    var fragIn=get('recvP');
+    if(fragIn && location.hash && location.hash.length>1){
+        try{ fragIn.value=decodeURIComponent(location.hash.slice(1)); }catch(e){}
+    }
+
+    // Turnstile file gate: if the caller arrived via /share/:id?pwd=X
+    // (non-E2EE fast link with Turnstile active), lift pwd from the query
+    // into the form field and scrub the URL bar so the password does not
+    // sit visible while the user solves the challenge.
+    var pwdIn=get('p');
+    if(pwdIn){
+        var q=new URL(location.href).searchParams.get('pwd');
+        if(q){
+            pwdIn.value=q;
+            try{ history.replaceState({}, '', location.pathname); }catch(e){}
+        }
     }
 })();
 
@@ -1880,7 +1937,7 @@ async function loadS() {
         get('tbl').innerHTML = d.files.map(f => {
             const lim = f.max_downloads === -1 ? '\u221e' : f.max_downloads;
             const lock = f.encrypted ? '<span title="' + escapeHtml(window.L.file_list_encrypted) + '" style="color:var(--accent); margin-right:6px" aria-label="E2EE">\u{1F512}</span>' : '';
-            return '<tr><td>' + lock + escapeHtml(f.filename) + '</td><td>' + (f.size / 1e6).toFixed(1) + 'MB</td><td style="color:var(--text-muted)">' + window.L.js_downloads + f.download_count + '/' + lim + '</td><td style="text-align:right"><button class="btn-del" onclick="del(\\'' + f.id + '\\')">' + window.L.js_btn_delete + '</button></td></tr>';
+            return '<tr><td>' + lock + escapeHtml(f.filename) + '</td><td>' + (f.size / 1e6).toFixed(1) + 'MB</td><td style="color:var(--text-muted)">' + window.L.js_downloads + f.download_count + '/' + lim + '</td><td style="text-align:right"><button class="btn-del" data-click="del" data-id="' + f.id + '">' + window.L.js_btn_delete + '</button></td></tr>';
         }).join('');
     } catch (e) { }
 }
@@ -1960,10 +2017,108 @@ if (location.hash.length > 1 && get('btnA')) {
     if (!get('tsWidget')) get('btnA').classList.remove('hidden');
 }
 ${LANG_PICKER_JS}
+
+// ── Event delegation ────────────────────────────────────────────────────────
+// Replaces the inline onclick/onchange/oninput/onsubmit attributes that the
+// old CSP had to allow via 'unsafe-inline'. Each action is keyed on the
+// element's data-click / data-change / data-input / data-submit attribute;
+// per-element parameters ride on data-id / data-arg / data-target etc. and
+// are read from el.dataset inside the registered function.
+var __ACTIONS = {
+    // Secrets panel
+    genS: function(){ genS(); },
+    genK: function(){ genK(); },
+    genFK: function(){ genFK(); },
+    processStore: function(){ processStore(); },
+
+    // File upload
+    showFile: function(){ showFile(); },
+    onE2eeToggle: function(){ onE2eeToggle(); },
+    upl: function(){ upl(); },
+
+    // File list (dynamic HTML from loadS)
+    del: function(e, el){ del(el.dataset.id); },
+
+    // URL shortener
+    shorten: function(){ shorten(); },
+    newLink: function(){
+        var r = get('link-res'); if (r) r.classList.add('hidden');
+        var u = get('lurl'); if (u) { u.value = ''; u.focus(); }
+    },
+
+    // Secret retrieval page
+    unlockM: function(){ unlockM(); },
+    unlockA: function(){ unlockA(); },
+
+    // E2EE file retrieval page
+    e2eeUnlock: function(){ e2eeUnlock(); },
+
+    // Normal file retrieval form (GET-via-? flow)
+    submitReceive: function(e){
+        e.preventDefault();
+        var p = get('p');
+        location.href = location.pathname + '?pwd=' + encodeURIComponent(p ? p.value : '');
+    },
+
+    // Generic helpers
+    reload: function(){ location.reload(); },
+    selectSelf: function(e, el){ el.select(); },
+    openInput: function(e, el){
+        var tgt = el.dataset.target;
+        if (tgt) { var t = get(tgt); if (t) t.click(); }
+    },
+    copyLink: function(e, el){
+        var t = get(el.dataset.target); copyBtn(el, t ? t.value : '');
+    },
+    qrLink: function(e, el){
+        var t = get(el.dataset.target); showQR(t ? t.value : '');
+    },
+    copyContent: function(e, el){
+        var c = get('content'); copyBtn(el, c ? c.innerText : '');
+    },
+    closeOverlay: function(e, el){
+        var ov = get(el.dataset.target); if (ov) ov.style.display = 'none';
+    },
+    closeOverlayBackdrop: function(e, el){
+        if (e.target === el) el.style.display = 'none';
+    },
+
+    // Appearance config
+    toggleCfg: function(e, el){
+        var p = get('cfgPanel'); if (p) p.classList.toggle('hidden');
+        el.classList.toggle('open');
+    },
+    pickPreset: function(e, el){ pickPreset(el.dataset.arg); },
+    pickBgPreset: function(e, el){ pickBgPreset(el.dataset.arg); },
+    setAccent: function(e, el){ setAccent(el.value); },
+    setBg: function(e, el){ setBg(el.value); },
+    previewBrand: function(){ previewBrand(); },
+    uploadLogo: function(){ uploadLogo(); },
+    removeLogo: function(){ removeLogo(); },
+    saveConfig: function(){ saveConfig(); },
+
+    // Top-bar / language picker
+    toggleTheme: function(){ toggleTheme(); },
+    langBtn: function(e){ e.stopPropagation(); toggleLangMenu(); },
+    setLang: function(e, el){ setLang(el.dataset.arg); },
+};
+
+function __dispatch(type){
+    document.addEventListener(type, function(e){
+        var el = e.target.closest('[data-' + type + ']');
+        if (!el) return;
+        var fn = __ACTIONS[el.dataset[type]];
+        if (typeof fn === 'function') fn(e, el);
+    });
+}
+__dispatch('click');
+__dispatch('change');
+__dispatch('input');
+__dispatch('submit');
 `
 
 const BASE_HTML = (body: string, langCode: LangCode = 'en', langPickerHtml: string = '', tailScript: string = ''): string =>
-  `<!DOCTYPE html><html lang="${langCode}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Edge Secrets</title><style>${CSS}</style></head><body><button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" title="Toggle theme">\u2600</button>${langPickerHtml}${body}<div class="overlay" id="qrOv" onclick="if(event.target===this)this.style.display='none'" style="display:none"><div class="modal" style="max-width:280px;padding:28px"><h3 style="margin-bottom:18px" id="qrTitle"></h3><img id="qrImg" class="qr-modal-img" alt="QR Code" src=""><p id="qrTxt" style="font-size:0.6rem;word-break:break-all;color:var(--text-muted);margin-bottom:18px;text-align:center;line-height:1.5"></p><button class="modal-btn" onclick="get('qrOv').style.display='none'" id="qrCloseBtn"></button></div></div><script src="/ui/app.v1.js" defer></script>${tailScript}</body></html>`
+  `<!DOCTYPE html><html lang="${langCode}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Edge Secrets</title><style>${CSS}</style></head><body><button class="theme-toggle" id="themeToggle" data-click="toggleTheme" title="Toggle theme">\u2600</button>${langPickerHtml}${body}<div class="overlay" id="qrOv" data-click="closeOverlayBackdrop" style="display:none"><div class="modal" style="max-width:280px;padding:28px"><h3 style="margin-bottom:18px" id="qrTitle"></h3><img id="qrImg" class="qr-modal-img" alt="QR Code" src=""><p id="qrTxt" style="font-size:0.6rem;word-break:break-all;color:var(--text-muted);margin-bottom:18px;text-align:center;line-height:1.5"></p><button class="modal-btn" data-click="closeOverlay" data-target="qrOv" id="qrCloseBtn"></button></div></div><script src="/ui/app.v1.js" defer></script>${tailScript}</body></html>`
 
 function renderGen(type: string, t: Translations, langCode: LangCode): string {
   const isLink = type === 'link'
@@ -1971,7 +2126,7 @@ function renderGen(type: string, t: Translations, langCode: LangCode): string {
   const isCred = !isLink && !isFile
   const lp = renderLangPicker(langCode)
   const body = `
-  <script>window.L = ${jsonEmbed(t)}; window.__algo = ${jsonEmbed(CURRENT_ALGO)};</script>
+  <script type="application/json" id="__ctx__">${jsonEmbed({ L: t, algo: CURRENT_ALGO })}</script>
   <script src="/ui/argon2.v1.js"></script>
   <div class="card">
       <div class="brand-header"><span class="brand-logo" id="brandName">EDGE SECRETS</span><p class="brand-tagline" id="brandTagline" style="display:none"></p></div>
@@ -1984,51 +2139,51 @@ function renderGen(type: string, t: Translations, langCode: LangCode): string {
         isCred
           ? `
       <div id="v-create">
-          <div class="label-row"><span>${t.label_secret}</span><span class="action-link" onclick="genS()">${t.action_gen_password}</span></div>
+          <div class="label-row"><span>${t.label_secret}</span><span class="action-link" data-click="genS">${t.action_gen_password}</span></div>
           <textarea id="body" placeholder="${t.placeholder_secret}"></textarea>
-          <div class="label-row"><span>${t.label_encrypt_key}</span><span class="action-link" onclick="genK()">${t.action_gen_key}</span></div>
+          <div class="label-row"><span>${t.label_encrypt_key}</span><span class="action-link" data-click="genK">${t.action_gen_key}</span></div>
           <input type="text" id="pass" placeholder="${t.placeholder_encrypt}">
           <div class="label-row"><span>${t.label_ttl}</span></div>
           <select id="ttl"><option value="3600">${t.ttl_1h}</option><option value="86400" selected>${t.ttl_24h}</option><option value="259200">${t.ttl_72h}</option></select>
-          <button class="btn" onclick="processStore()" id="btnGo"><span>${t.btn_generate_links}</span><div class="spinner"></div></button>
+          <button class="btn" data-click="processStore" id="btnGo"><span>${t.btn_generate_links}</span><div class="spinner"></div></button>
       </div>
       <div id="v-result" class="hidden">
           <div class="res-box">
               <div class="label-row">${t.option1_manual}</div>
-              <div class="input-group"><input type="text" id="linkS" readonly onclick="this.select()"><button class="btn-copy" onclick="copyBtn(this, get('linkS').value)">${t.copy}</button><button class="btn-qr" onclick="showQR(get('linkS').value)" title="QR">QR</button></div>
+              <div class="input-group"><input type="text" id="linkS" readonly data-click="selectSelf"><button class="btn-copy" data-click="copyLink" data-target="linkS">${t.copy}</button><button class="btn-qr" data-click="qrLink" data-target="linkS" title="QR">QR</button></div>
               <div class="label-row">${t.option2_fast}</div>
-              <div class="input-group"><input type="text" id="linkE" readonly onclick="this.select()"><button class="btn-copy" onclick="copyBtn(this, get('linkE').value)">${t.copy}</button><button class="btn-qr" onclick="showQR(get('linkE').value)" title="QR">QR</button></div>
+              <div class="input-group"><input type="text" id="linkE" readonly data-click="selectSelf"><button class="btn-copy" data-click="copyLink" data-target="linkE">${t.copy}</button><button class="btn-qr" data-click="qrLink" data-target="linkE" title="QR">QR</button></div>
           </div>
-          <button class="btn" style="background:transparent; color:var(--text); border:1px solid var(--border-strong); margin-top:20px;" onclick="location.reload()">${t.btn_new_operation}</button>
+          <button class="btn" style="background:transparent; color:var(--text); border:1px solid var(--border-strong); margin-top:20px;" data-click="reload">${t.btn_new_operation}</button>
       </div>`
           : isFile ? `
       <div id="v-file-upload">
-          <div class="drop-zone" onclick="get('f').click()">
+          <div class="drop-zone" data-click="openInput" data-target="f">
               <div style="font-size:30px; margin-bottom:10px;">
                   <span id="dtxt" style="font-weight:600; font-size:0.85rem; color:var(--accent); letter-spacing:0.06em;">${t.js_click_select}</span>
               </div>
           </div>
-          <input type="file" id="f" style="display:none" onchange="showFile()">
+          <input type="file" id="f" style="display:none" data-change="showFile">
           <div id="dragOv" class="drag-overlay" aria-hidden="true">
               <div class="drag-overlay-inner">${t.file_drop_here}</div>
           </div>
           <div class="ts-toggle-row" style="margin-top:14px; margin-bottom:4px">
               <span class="cfg-label">${t.file_toggle_e2ee}</span>
-              <label class="ts-toggle"><input type="checkbox" id="fE2ee" onchange="onE2eeToggle()"><span class="ts-track"></span><span class="ts-thumb"></span></label>
+              <label class="ts-toggle"><input type="checkbox" id="fE2ee" data-change="onE2eeToggle"><span class="ts-track"></span><span class="ts-thumb"></span></label>
           </div>
           <div style="font-size:0.6rem; color:var(--text-muted); line-height:1.5; margin-bottom:12px">${t.file_e2ee_hint}</div>
-          <div class="label-row"><span id="fpwdLabel">${t.label_pwd_optional}</span><span class="action-link" onclick="genFK()">${t.action_gen_key}</span></div>
+          <div class="label-row"><span id="fpwdLabel">${t.label_pwd_optional}</span><span class="action-link" data-click="genFK">${t.action_gen_key}</span></div>
           <input type="text" id="fpwd" placeholder="${t.placeholder_leave_empty}">
           <div style="display:flex; gap:15px">
               <div style="flex:1"><div class="label-row">${t.label_retention}</div><select id="fttl"><option value="43200000">${t.ttl_12h}</option><option value="172800000" selected>${t.ttl_2d}</option><option value="604800000">${t.ttl_7d}</option></select></div>
               <div style="flex:1"><div class="label-row">${t.label_download_limit}</div><select id="flimit"><option value="1" selected>${t.limit_1}</option><option value="5">${t.limit_5}</option><option value="-1">${t.limit_unlimited}</option></select></div>
           </div>
-          <button class="btn" onclick="upl()" id="btnF"><span>${t.btn_send_file}</span><div class="spinner"></div></button>
+          <button class="btn" data-click="upl" id="btnF"><span>${t.btn_send_file}</span><div class="spinner"></div></button>
           <div id="fmsg" style="margin-top:15px; font-weight:600; text-align:center; color:var(--accent); font-size:0.85rem; letter-spacing:0.04em;"></div>
           <div class="res-box hidden" id="f-res">
              <div class="label-row">${t.option1_manual}</div>
-             <div class="input-group"><input type="text" id="flinkS" readonly onclick="this.select()"><button class="btn-copy" onclick="copyBtn(this, get('flinkS').value)">${t.copy}</button><button class="btn-qr" onclick="showQR(get('flinkS').value)" title="QR">QR</button></div>
-             <div id="f-auto-row" class="hidden"><div class="label-row">${t.option2_fast}</div><div class="input-group"><input type="text" id="flinkE" readonly onclick="this.select()"><button class="btn-copy" onclick="copyBtn(this, get('flinkE').value)">${t.copy}</button><button class="btn-qr" onclick="showQR(get('flinkE').value)" title="QR">QR</button></div></div>
+             <div class="input-group"><input type="text" id="flinkS" readonly data-click="selectSelf"><button class="btn-copy" data-click="copyLink" data-target="flinkS">${t.copy}</button><button class="btn-qr" data-click="qrLink" data-target="flinkS" title="QR">QR</button></div>
+             <div id="f-auto-row" class="hidden"><div class="label-row">${t.option2_fast}</div><div class="input-group"><input type="text" id="flinkE" readonly data-click="selectSelf"><button class="btn-copy" data-click="copyLink" data-target="flinkE">${t.copy}</button><button class="btn-qr" data-click="qrLink" data-target="flinkE" title="QR">QR</button></div></div>
           </div>
       </div>
       <div style="margin-top:36px; padding-top:20px; border-top:1px solid var(--border);">
@@ -2044,34 +2199,34 @@ function renderGen(type: string, t: Translations, langCode: LangCode): string {
               <div style="flex:1"><div class="label-row">${t.label_expiry}</div><select id="lttl"><option value="3600">${t.ttl_1h}</option><option value="86400" selected>${t.ttl_24h}</option><option value="604800">${t.ttl_7d}</option><option value="-1">${t.ttl_never}</option></select></div>
               <div style="flex:1"><div class="label-row">${t.label_click_limit}</div><select id="lclicks"><option value="1">${t.limit_1}</option><option value="10">${t.limit_10}</option><option value="100">${t.limit_100}</option><option value="-1" selected>${t.limit_unlimited}</option></select></div>
           </div>
-          <button class="btn" onclick="shorten()" id="btnLink"><span>${t.btn_shorten}</span><div class="spinner"></div></button>
+          <button class="btn" data-click="shorten" id="btnLink"><span>${t.btn_shorten}</span><div class="spinner"></div></button>
           <div class="res-box hidden" id="link-res">
               <div class="label-row">${t.label_short_link}</div>
-              <div class="input-group"><input type="text" id="shortLink" readonly onclick="this.select()"><button class="btn-copy" onclick="copyBtn(this,get('shortLink').value)">${t.copy}</button><button class="btn-qr" onclick="showQR(get('shortLink').value)" title="QR">QR</button></div>
-              <button class="btn" style="background:transparent;color:var(--text);border:1px solid var(--border-strong);margin-top:16px" onclick="get('link-res').classList.add('hidden');get('lurl').value='';get('lurl').focus()">${t.btn_new_link}</button>
+              <div class="input-group"><input type="text" id="shortLink" readonly data-click="selectSelf"><button class="btn-copy" data-click="copyLink" data-target="shortLink">${t.copy}</button><button class="btn-qr" data-click="qrLink" data-target="shortLink" title="QR">QR</button></div>
+              <button class="btn" style="background:transparent;color:var(--text);border:1px solid var(--border-strong);margin-top:16px" data-click="newLink">${t.btn_new_link}</button>
           </div>
       </div>`
       }
-  </div><div id="ov" class="overlay"><div class="modal"><h3 id="mT"></h3><p id="mMsg"></p><button class="modal-btn" onclick="get('ov').style.display='none'">OK</button></div></div>
-  <div class="cfg-toggle" id="cfgToggle" onclick="document.getElementById('cfgPanel').classList.toggle('hidden');this.classList.toggle('open')">
+  </div><div id="ov" class="overlay"><div class="modal"><h3 id="mT"></h3><p id="mMsg"></p><button class="modal-btn" data-click="closeOverlay" data-target="ov">OK</button></div></div>
+  <div class="cfg-toggle" id="cfgToggle" data-click="toggleCfg">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
   </div>
   <div class="cfg-panel hidden" id="cfgPanel">
     <div class="cfg-section">
       <div class="cfg-section-label">${t.cfg_accent}</div>
       <div class="cfg-presets">
-        <div class="cfg-preset" style="background:#818cf8" onclick="pickPreset('#818cf8')" title="Indigo"></div>
-        <div class="cfg-preset" style="background:#a78bfa" onclick="pickPreset('#a78bfa')" title="Violet"></div>
-        <div class="cfg-preset" style="background:#60a5fa" onclick="pickPreset('#60a5fa')" title="Blue"></div>
-        <div class="cfg-preset" style="background:#22d3ee" onclick="pickPreset('#22d3ee')" title="Cyan"></div>
-        <div class="cfg-preset" style="background:#34d399" onclick="pickPreset('#34d399')" title="Emerald"></div>
-        <div class="cfg-preset" style="background:#fb7185" onclick="pickPreset('#fb7185')" title="Rose"></div>
-        <div class="cfg-preset" style="background:#fbbf24" onclick="pickPreset('#fbbf24')" title="Amber"></div>
-        <div class="cfg-preset" style="background:#f8fafc" onclick="pickPreset('#f8fafc')" title="White"></div>
+        <div class="cfg-preset" style="background:#818cf8" data-click="pickPreset" data-arg="#818cf8" title="Indigo"></div>
+        <div class="cfg-preset" style="background:#a78bfa" data-click="pickPreset" data-arg="#a78bfa" title="Violet"></div>
+        <div class="cfg-preset" style="background:#60a5fa" data-click="pickPreset" data-arg="#60a5fa" title="Blue"></div>
+        <div class="cfg-preset" style="background:#22d3ee" data-click="pickPreset" data-arg="#22d3ee" title="Cyan"></div>
+        <div class="cfg-preset" style="background:#34d399" data-click="pickPreset" data-arg="#34d399" title="Emerald"></div>
+        <div class="cfg-preset" style="background:#fb7185" data-click="pickPreset" data-arg="#fb7185" title="Rose"></div>
+        <div class="cfg-preset" style="background:#fbbf24" data-click="pickPreset" data-arg="#fbbf24" title="Amber"></div>
+        <div class="cfg-preset" style="background:#f8fafc" data-click="pickPreset" data-arg="#f8fafc" title="White"></div>
       </div>
       <div class="cfg-picker-row">
         <div class="cfg-swatch" id="cfgSwatch"></div>
-        <input type="color" class="cfg-color" id="accentPicker" value="#818cf8" oninput="setAccent(this.value)">
+        <input type="color" class="cfg-color" id="accentPicker" value="#818cf8" data-input="setAccent">
         <span class="cfg-label" id="cfgAccentHex" style="flex:1;text-align:right">#818cf8</span>
       </div>
     </div>
@@ -2079,17 +2234,17 @@ function renderGen(type: string, t: Translations, langCode: LangCode): string {
     <div class="cfg-section">
       <div class="cfg-section-label">${t.cfg_bg}</div>
       <div class="cfg-presets">
-        <div class="cfg-preset-bg" style="background:#000000;border:1px solid rgba(255,255,255,0.15)" onclick="pickBgPreset('#000000')" title="Pure Black"></div>
-        <div class="cfg-preset-bg" style="background:#080810" onclick="pickBgPreset('#080810')" title="Indigo Black"></div>
-        <div class="cfg-preset-bg" style="background:#05080f" onclick="pickBgPreset('#05080f')" title="Navy Black"></div>
-        <div class="cfg-preset-bg" style="background:#0d0610" onclick="pickBgPreset('#0d0610')" title="Violet Black"></div>
-        <div class="cfg-preset-bg" style="background:#060f08" onclick="pickBgPreset('#060f08')" title="Forest Black"></div>
-        <div class="cfg-preset-bg" style="background:#100608" onclick="pickBgPreset('#100608')" title="Crimson Black"></div>
-        <div class="cfg-preset-bg" style="background:#0f0c05" onclick="pickBgPreset('#0f0c05')" title="Amber Black"></div>
+        <div class="cfg-preset-bg" style="background:#000000;border:1px solid rgba(255,255,255,0.15)" data-click="pickBgPreset" data-arg="#000000" title="Pure Black"></div>
+        <div class="cfg-preset-bg" style="background:#080810" data-click="pickBgPreset" data-arg="#080810" title="Indigo Black"></div>
+        <div class="cfg-preset-bg" style="background:#05080f" data-click="pickBgPreset" data-arg="#05080f" title="Navy Black"></div>
+        <div class="cfg-preset-bg" style="background:#0d0610" data-click="pickBgPreset" data-arg="#0d0610" title="Violet Black"></div>
+        <div class="cfg-preset-bg" style="background:#060f08" data-click="pickBgPreset" data-arg="#060f08" title="Forest Black"></div>
+        <div class="cfg-preset-bg" style="background:#100608" data-click="pickBgPreset" data-arg="#100608" title="Crimson Black"></div>
+        <div class="cfg-preset-bg" style="background:#0f0c05" data-click="pickBgPreset" data-arg="#0f0c05" title="Amber Black"></div>
       </div>
       <div class="cfg-picker-row">
         <div class="cfg-swatch" id="cfgBgSwatch" style="background:#000"></div>
-        <input type="color" class="cfg-color" id="bgPicker" value="#000000" oninput="setBg(this.value)">
+        <input type="color" class="cfg-color" id="bgPicker" value="#000000" data-input="setBg">
         <span class="cfg-label" id="cfgBgHex" style="flex:1;text-align:right">#000000</span>
       </div>
     </div>
@@ -2098,25 +2253,25 @@ function renderGen(type: string, t: Translations, langCode: LangCode): string {
       <div class="cfg-section-label">${t.cfg_branding}</div>
       <div class="cfg-row" style="margin-bottom:8px">
         <span class="cfg-label">${t.cfg_name}</span>
-        <input type="text" class="cfg-input" id="cfgBrandName" placeholder="EDGE SECRETS" maxlength="32" oninput="previewBrand()">
+        <input type="text" class="cfg-input" id="cfgBrandName" placeholder="EDGE SECRETS" maxlength="32" data-input="previewBrand">
       </div>
       <div class="cfg-row">
         <span class="cfg-label">${t.cfg_tagline_label}</span>
-        <input type="text" class="cfg-input" id="cfgTagline" placeholder="${t.cfg_tagline_placeholder}" maxlength="60" oninput="previewBrand()">
+        <input type="text" class="cfg-input" id="cfgTagline" placeholder="${t.cfg_tagline_placeholder}" maxlength="60" data-input="previewBrand">
       </div>
     </div>
     <div class="cfg-divider"></div>
     <div class="cfg-section">
       <div class="cfg-section-label">${t.cfg_logo_label} <span style="font-weight:400;opacity:0.6">${t.cfg_logo_specs}</span></div>
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
-        <img id="logoPreview" class="cfg-logo-preview" src="/ui/logo" onload="this.style.display='inline-block'" onerror="this.style.display='none'" style="display:none">
+        <img id="logoPreview" class="cfg-logo-preview" src="/ui/logo" style="display:none">
         <span class="cfg-label" id="logoStatus">${t.js_no_logo}</span>
       </div>
       <div style="display:flex;gap:6px">
-        <span class="cfg-upload" onclick="get('logoInput').click()">${t.cfg_upload}</span>
-        <span class="cfg-upload cfg-upload-del" onclick="removeLogo()">${t.cfg_delete}</span>
+        <span class="cfg-upload" data-click="openInput" data-target="logoInput">${t.cfg_upload}</span>
+        <span class="cfg-upload cfg-upload-del" data-click="removeLogo">${t.cfg_delete}</span>
       </div>
-      <input type="file" id="logoInput" accept="image/png,image/svg+xml,image/jpeg,image/webp" style="display:none" onchange="uploadLogo()">
+      <input type="file" id="logoInput" accept="image/png,image/svg+xml,image/jpeg,image/webp" style="display:none" data-change="uploadLogo">
     </div>
     <div class="cfg-divider"></div>
     <div class="cfg-section">
@@ -2152,9 +2307,9 @@ function renderGen(type: string, t: Translations, langCode: LangCode): string {
       <div style="margin-top:8px;font-size:0.6rem;color:var(--text-muted);line-height:1.5">${t.cfg_limits_hint}</div>
     </div>
     <div class="cfg-divider"></div>
-    <button class="cfg-save" id="cfgSave" onclick="saveConfig()">${t.js_save}</button>
+    <button class="cfg-save" id="cfgSave" data-click="saveConfig">${t.js_save}</button>
   </div>
-  <div class="overlay" id="okayOv" onclick="if(event.target===this)this.style.display='none'" style="display:none">
+  <div class="overlay" id="okayOv" data-click="closeOverlayBackdrop" style="display:none">
     <div class="modal">
       <h3>${t.cfg_free_warning_title}</h3>
       <p style="margin-bottom:14px;line-height:1.5">${t.cfg_free_warning_body}</p>
@@ -2178,7 +2333,7 @@ function renderReceiveCred(_id: string, lang: Lang, langCode: LangCode, turnstil
     ? `<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>`
     : ''
   const body = `
-  <script>window.L = ${jsonEmbed(lang)}; window.__algo = ${jsonEmbed(algoVersion)};</script>
+  <script type="application/json" id="__ctx__">${jsonEmbed({ L: lang, algo: algoVersion })}</script>
   <script src="/ui/argon2.v1.js"></script>
   <div class="card">
     <div class="brand-header"><span class="brand-logo">EDGE SECRETS</span></div>
@@ -2191,8 +2346,8 @@ function renderReceiveCred(_id: string, lang: Lang, langCode: LangCode, turnstil
       <div style="background:var(--accent-dim); padding:18px; font-weight:600; margin-bottom:20px; color:var(--accent); border:1px solid var(--border-strong); font-size:0.82rem; letter-spacing:0.08em; text-align:center;">${lang.ready_msg}</div>
     </div>
     ${tsWidget}
-    <button class="btn${turnstileSiteKey ? ' hidden' : ''}" onclick="unlockM()" id="btnM"><span>${lang.btn_decrypt}</span><div class="spinner"></div></button>
-    <button class="btn hidden" onclick="unlockA()" id="btnA"><span>${lang.btn_open}</span><div class="spinner"></div></button>
+    <button class="btn${turnstileSiteKey ? ' hidden' : ''}" data-click="unlockM" id="btnM"><span>${lang.btn_decrypt}</span><div class="spinner"></div></button>
+    <button class="btn hidden" data-click="unlockA" id="btnA"><span>${lang.btn_open}</span><div class="spinner"></div></button>
     <div id="v-decrypted" class="hidden">
       <div class="label-row">${lang.label_decrypted}</div>
       <pre id="content"></pre>
@@ -2200,9 +2355,9 @@ function renderReceiveCred(_id: string, lang: Lang, langCode: LangCode, turnstil
           <div class="timer-wrap" style="height:28px; margin-bottom:0;"><div id="tFill" class="timer-fill"></div></div>
           <div id="tText" class="timer-text" style="top:0; line-height:28px;"></div>
       </div>
-      <button class="btn" style="margin-top:20px;" onclick="copyBtn(this, get('content').innerText)"><span>${lang.btn_copy}</span></button>
+      <button class="btn" style="margin-top:20px;" data-click="copyContent"><span>${lang.btn_copy}</span></button>
     </div>
-  </div><div id="ov" class="overlay"><div class="modal"><h3 id="mT"></h3><p id="mMsg"></p><button class="modal-btn" onclick="get('ov').style.display='none'">OK</button></div></div>`
+  </div><div id="ov" class="overlay"><div class="modal"><h3 id="mT"></h3><p id="mMsg"></p><button class="modal-btn" data-click="closeOverlay" data-target="ov">OK</button></div></div>`
   return BASE_HTML(body, langCode, lp, tsScript)
 }
 
@@ -2222,13 +2377,13 @@ function renderReceiveFileE2EE(
     ? `<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>`
     : ''
   const body = `
-  <script>
-    window.L = ${jsonEmbed(lang)};
-    window.__algo = 'argon2id-v1';
-    window.__fileId = ${jsonEmbed(id)};
-    window.__fileName = ${jsonEmbed(filename)};
-    window.__tsRequired = ${turnstileSiteKey ? 'true' : 'false'};
-  </script>
+  <script type="application/json" id="__ctx__">${jsonEmbed({
+    L: lang,
+    algo: 'argon2id-v1',
+    fileId: id,
+    fileName: filename,
+    tsRequired: !!turnstileSiteKey,
+  })}</script>
   <script src="/ui/argon2.v1.js"></script>
   <div class="card">
     <div class="brand-header"><span class="brand-logo" id="brandName">EDGE SECRETS</span><p class="brand-tagline" id="brandTagline" style="display:none"></p></div>
@@ -2242,23 +2397,10 @@ function renderReceiveFileE2EE(
       <input type="password" id="recvP" placeholder="${lang.placeholder_key}">
     </div>
     ${tsWidget}
-    <button class="btn${turnstileSiteKey ? ' hidden' : ''}" onclick="e2eeUnlock()" id="btnE2ee"><span>${lang.file_e2ee_btn_decrypt}</span><div class="spinner"></div></button>
+    <button class="btn${turnstileSiteKey ? ' hidden' : ''}" data-click="e2eeUnlock" id="btnE2ee"><span>${lang.file_e2ee_btn_decrypt}</span><div class="spinner"></div></button>
     <div id="e2eeMsg" style="margin-top:14px; text-align:center; font-size:0.8rem; color:var(--text-muted); display:none"></div>
   </div>
-  <div id="ov" class="overlay"><div class="modal"><h3 id="mT"></h3><p id="mMsg"></p><button class="modal-btn" onclick="get('ov').style.display='none'">OK</button></div></div>
-  <script>
-    // If the share URL carries a #fragment (fast-link flow), pre-fill the
-    // passphrase input. The fragment is strictly client-side — browsers
-    // never include it in outgoing requests.
-    (function(){
-      if (!location.hash || location.hash.length < 2) return;
-      try {
-        var v = decodeURIComponent(location.hash.slice(1));
-        var inp = document.getElementById('recvP');
-        if (inp) inp.value = v;
-      } catch(e) {}
-    })();
-  </script>`
+  <div id="ov" class="overlay"><div class="modal"><h3 id="mT"></h3><p id="mMsg"></p><button class="modal-btn" data-click="closeOverlay" data-target="ov">OK</button></div></div>`
   return BASE_HTML(body, langCode, lp, tsScript)
 }
 
@@ -2266,7 +2408,7 @@ function renderReceiveFile(filename: string, lang: Lang, langCode: LangCode): st
   const safeName = escapeHtml(filename) as string
   const lp = renderLangPicker(langCode)
   const body = `
-  <script>window.L = ${jsonEmbed(lang)};</script>
+  <script type="application/json" id="__ctx__">${jsonEmbed({ L: lang })}</script>
   <div class="card">
       <div class="brand-header"><span class="brand-logo" id="brandName">EDGE SECRETS</span><p class="brand-tagline" id="brandTagline" style="display:none"></p></div>
       <h2 style="text-align:center; font-size:1.1rem; margin-bottom:24px; color:var(--text); font-weight:600; letter-spacing:0.04em;">${lang.title_file}</h2>
@@ -2275,11 +2417,11 @@ function renderReceiveFile(filename: string, lang: Lang, langCode: LangCode): st
           <h2 style="border:none; margin:0; font-size:1.3rem; word-break: break-all; font-weight:600; color:var(--text)">${safeName}</h2>
           <p style="font-size:0.9rem; font-weight:500; color:var(--text-muted); margin-top:5px">${lang.file_protected}</p>
       </div>
-      <form onsubmit="event.preventDefault(); location.href=location.pathname+'?pwd='+get('p').value">
+      <form data-submit="submitReceive">
           <input type="password" id="p" placeholder="${lang.placeholder_key}" autofocus>
           <button class="btn"><span>${lang.btn_unlock}</span></button>
       </form>
-  </div><div id="ov" class="overlay"><div class="modal"><h3 id="mT"></h3><p id="mMsg"></p><button class="modal-btn" onclick="get('ov').style.display='none'">OK</button></div></div>`
+  </div><div id="ov" class="overlay"><div class="modal"><h3 id="mT"></h3><p id="mMsg"></p><button class="modal-btn" data-click="closeOverlay" data-target="ov">OK</button></div></div>`
   return BASE_HTML(body, langCode, lp)
 }
 
@@ -2301,7 +2443,7 @@ function renderFileTurnstileGate(
   const tailScript = `
   <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" defer></script>`
   const body = `
-  <script>window.L = ${jsonEmbed(lang)};</script>
+  <script type="application/json" id="__ctx__">${jsonEmbed({ L: lang })}</script>
   <div class="card">
       <div class="brand-header"><span class="brand-logo" id="brandName">EDGE SECRETS</span><p class="brand-tagline" id="brandTagline" style="display:none"></p></div>
       <h2 style="text-align:center; font-size:1.1rem; margin-bottom:24px; color:var(--text); font-weight:600; letter-spacing:0.04em;">${lang.title_file}</h2>
@@ -2318,21 +2460,6 @@ function renderFileTurnstileGate(
           ${passwordField}
           <button class="btn" id="btnDl" style="margin-top:14px" ${hasPassword ? 'disabled' : ''}><span>${lang.btn_unlock}</span></button>
       </form>
-  </div><div id="ov" class="overlay"><div class="modal"><h3 id="mT"></h3><p id="mMsg"></p><button class="modal-btn" onclick="get('ov').style.display='none'">OK</button></div></div>
-  <script>
-    // Fast-link autofill: /share/:id?pwd=X embeds the password in the query
-    // string. When Turnstile is inactive the server handles pwd server-side
-    // and streams the file; when Turnstile is active we render this gate
-    // instead and the pwd would otherwise be lost. Lift it from the URL into
-    // the form field, then scrub it from the address bar so it doesn't sit
-    // there in plain view while the user solves the challenge.
-    (function(){
-      var q = new URL(location.href).searchParams.get('pwd');
-      if (!q) return;
-      var el = document.getElementById('p');
-      if (el) el.value = q;
-      try { history.replaceState({}, '', location.pathname); } catch(e) {}
-    })();
-  </script>`
+  </div><div id="ov" class="overlay"><div class="modal"><h3 id="mT"></h3><p id="mMsg"></p><button class="modal-btn" data-click="closeOverlay" data-target="ov">OK</button></div></div>`
   return BASE_HTML(body, langCode, lp, tailScript)
 }

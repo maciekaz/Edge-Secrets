@@ -216,7 +216,8 @@ flowchart LR
 | **Global Pepper** | File password hashes include a server-side secret; D1 leak doesn't compromise passwords |
 | **Server-side TTL cap** | Backend enforces maximum lifetime; client cannot exceed it |
 | **CF Access + JWT verification** | Protected endpoints guarded at two layers: Cloudflare Access policy + in-Worker RS256 JWT verification against JWKS endpoint (cached 1 h) |
-| **Security headers** | CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy |
+| **Security headers** | HSTS (1-year, preloadable), X-Frame-Options `DENY`, X-Content-Type-Options `nosniff`, Referrer-Policy `no-referrer`, Cross-Origin-Opener-Policy `same-origin`, Cross-Origin-Resource-Policy `same-origin`, explicit Permissions-Policy denying every permission-gated API we don't use |
+| **Content-Security-Policy (strict)** | No `'unsafe-inline'` on `script-src`, no `'unsafe-eval'`, no external script origins beyond Cloudflare Turnstile. All page JS is delivered from `/ui/app.v1.js` (same-origin, bundled). Per-page data (i18n, page context) ships in `<script type="application/json">` data islands that the browser stores but never executes. Event handlers use `data-action` attributes dispatched by a single delegating listener — no `onclick=` attributes anywhere. A stored XSS (even one that slipped past escapeHtml) cannot execute because inline script is categorically forbidden |
 | **RFC 5987 filenames** | Safe percent-encoded `Content-Disposition` filenames (no header injection) |
 | **No content logging** | Errors return generic messages - no `e.message` leakage |
 | **Bindings guard** | Worker returns 500 on startup if any required binding is missing (DB, BUCKET, KV, PEPPER, CF_TEAM_DOMAIN, CF_AUD) |

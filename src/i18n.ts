@@ -1443,10 +1443,10 @@ const LANG_OPTIONS: ReadonlyArray<{ code: LangCode; flag: string; name: string }
 export function renderLangPicker(currentLang: LangCode): string {
   const current = LANG_OPTIONS.find(l => l.code === currentLang) ?? LANG_OPTIONS[0]
   const items = LANG_OPTIONS.map(l =>
-    `<div class="lang-item${l.code === currentLang ? ' active' : ''}" onclick="setLang('${l.code}')">${l.flag} ${l.name}</div>`
+    `<div class="lang-item${l.code === currentLang ? ' active' : ''}" data-click="setLang" data-arg="${l.code}">${l.flag} ${l.name}</div>`
   ).join('')
 
-  return `<div class="lang-picker"><button class="lang-btn" onclick="event.stopPropagation();toggleLangMenu()" title="${current.name}">${current.flag}</button><div class="lang-menu" id="langMenu">${items}</div></div>`
+  return `<div class="lang-picker"><button class="lang-btn" data-click="langBtn" title="${current.name}">${current.flag}</button><div class="lang-menu" id="langMenu">${items}</div></div>`
 }
 
 export const LANG_PICKER_CSS = `
