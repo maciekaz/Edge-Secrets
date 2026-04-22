@@ -393,6 +393,25 @@ app.use('*', async (c, next) => {
   return next()
 })
 
+// Baseline security headers on every response — HTML pages already layer the
+// full HTML_SECURITY_HEADERS set (CSP, COOP, CORP, Permissions-Policy, …) on
+// top, but 404/plain-text/JSON responses used to go out bare. HSTS especially
+// needs to ride every response so browsers pin the HTTPS upgrade even when
+// someone probes a non-existent path on HTTP first.
+app.use('*', async (c, next) => {
+  await next()
+  const h = c.res.headers
+  if (!h.has('Strict-Transport-Security')) {
+    h.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload')
+  }
+  if (!h.has('X-Content-Type-Options')) {
+    h.set('X-Content-Type-Options', 'nosniff')
+  }
+  if (!h.has('Referrer-Policy')) {
+    h.set('Referrer-Policy', 'no-referrer')
+  }
+})
+
 // ── Routes ────────────────────────────────────────────────────────────────────
 
 // CF Access JWT guard — single middleware rule covers all admin endpoints
