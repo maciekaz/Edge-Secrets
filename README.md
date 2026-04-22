@@ -136,16 +136,22 @@ Files have two independent modes, chosen per-upload via a toggle on `/gen` → F
 #### Normal (server-visible) flow
 
 ```mermaid
-flowchart LR
-    U([Uploader]) -->|file + password + TTL + limit| W[Worker]
-    W -->|binary| R2[(R2)]
-    W -->|metadata + SHA-256 password hash| D1[(D1)]
-    W -->|share link| U
+sequenceDiagram
+    participant U as Uploader
+    participant W as Worker
+    participant R2 as R2
+    participant D1 as D1
+    participant R as Recipient
 
-    R([Recipient]) -->|GET /share/id| W
-    W -->|check password · TTL · download limit| W
-    W -->|file stream| R
-    W -.->|burn when limit reached| R2
+    U->>W: file + password + TTL + limit
+    W->>R2: store binary
+    W->>D1: metadata + salted SHA-256 hash
+    W-->>U: share link
+
+    R->>W: GET /share/:id + password
+    W->>W: verify salted hash · check TTL + download limit
+    W-->>R: file stream
+    W-->>R2: burn when download limit reached
 ```
 
 - Optional password hashed as `SHA-256(password + per-file salt + PEPPER)` with constant-time comparison — each row gets its own 16-byte random salt so identical passwords across files never collide, and timing cannot leak how close a guess was
@@ -163,7 +169,8 @@ File passwords are hashed as `SHA-256(password + PEPPER)`, where `PEPPER` is a g
 ```mermaid
 flowchart LR
     P[User password] --> H[SHA-256]
-    K[PEPPER\nCloudflare Secret] --> H
+    S[Per-file salt<br/>16 random bytes] --> H
+    K[PEPPER<br/>Cloudflare Secret] --> H
     H --> DB[(Hash stored in D1)]
 ```
 
@@ -174,17 +181,24 @@ The Worker refuses to start if `PEPPER` is not set (`bindings guard`).
 When the uploader flips the **End-to-End Encryption** toggle on the files tab, the file never leaves the browser unencrypted:
 
 ```mermaid
-flowchart LR
-    U([Uploader]) -->|AES-GCM in browser| U
-    U -->|ciphertext + IV + Argon2id verifier| W[Worker]
-    W -->|ciphertext blob| R2[(R2)]
-    W -->|metadata + verifier| D1[(D1)]
-    W -->|share link #passphrase| U
+sequenceDiagram
+    participant U as Uploader (browser)
+    participant W as Worker
+    participant R2 as R2
+    participant D1 as D1
+    participant R as Recipient (browser)
 
-    R([Recipient]) -->|POST verifier candidate| W
-    W -->|check verifier · limit · Turnstile| W
-    W -->|ciphertext stream| R
-    R -->|AES-GCM decrypt in browser| R
+    U->>U: derive Argon2id key + verifier from passphrase
+    U->>U: AES-GCM encrypt (IV prepended to ciphertext)
+    U->>W: ciphertext + verifier + algoVersion
+    W->>R2: store ciphertext blob
+    W->>D1: metadata + verifier + algoVersion
+    W-->>U: share link (passphrase in URL fragment)
+
+    R->>W: POST verifier candidate (+ Turnstile token)
+    W->>W: compare verifier · check limit
+    W-->>R: ciphertext stream
+    R->>R: AES-GCM decrypt, trigger download
 ```
 
 | Element | Algorithm | Parameters |
@@ -245,14 +259,14 @@ Audit scripts and detailed findings live locally (not in the repo) — reach out
 
 ```mermaid
 flowchart TD
-    Browser -->|protected routes\n/gen\n/api/v1/admin/*| CFA[Cloudflare Access\nJWT RS256 verification]
-    Browser -->|public routes\n/receive/:id, /share/:id\n/api/v1/public/*\n/ui/config, /ui/logo| Worker
+    Browser -->|"protected routes<br/>/gen · /api/v1/admin/*"| CFA["Cloudflare Access<br/>JWT RS256 verification"]
+    Browser -->|"public routes<br/>/receive/:id · /share/:id<br/>/api/v1/public/* · /ui/*"| Worker
 
-    CFA -->|verified request| Worker[Cloudflare Worker\nHono / TypeScript]
+    CFA -->|verified request| Worker["Cloudflare Worker<br/>Hono / TypeScript"]
 
-    Worker --> KV[(KV Store\nEncrypted text secrets)]
-    Worker --> D1[(D1 Database\nFile metadata)]
-    Worker --> R2[(R2 Bucket\nFile binaries)]
+    Worker --> KV[("KV Store<br/>Encrypted text secrets")]
+    Worker --> D1[("D1 Database<br/>File metadata")]
+    Worker --> R2[("R2 Bucket<br/>File binaries")]
 ```
 
 | Resource | Usage |
