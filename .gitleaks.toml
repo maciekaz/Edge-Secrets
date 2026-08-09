@@ -1,0 +1,10 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known non-secret test fixture"
+# A WebAuthn assertion captured from a Chrome CDP virtual authenticator, kept as
+# a regression fixture. It holds a public key, an already-consumed challenge and
+# a signature over public data. The virtual authenticator that produced it no
+# longer exists, so there is no private material here; the hit is entropy alone.
+paths = ['''test/fixtures-webauthn\.json''']

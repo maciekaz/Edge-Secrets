@@ -1,12 +1,19 @@
 {
   "name": "secrets-worker",
-  "version": "2.0.1",
+  "version": "3.0.0",
   "private": true,
   "scripts": {
     "dev": "wrangler dev src/index.ts",
     "deploy": "wrangler deploy src/index.ts",
     "build": "wrangler deploy --dry-run --outdir dist src/index.ts",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test:unit": "vitest run",
+    "test:e2e": "playwright test",
+    "test:smoke": "bash scripts/smoke.sh",
+    "test:kv": "bash scripts/kv-invariants.sh",
+    "test:d1": "bash scripts/d1-invariants.sh",
+    "test:csp": "bash scripts/csp-check.sh",
+    "test": "npm run lint && npm run test:unit && npm run test:smoke && npm run test:kv && npm run test:d1 && npm run test:csp"
   },
   "dependencies": {
     "hash-wasm": "^4.12.0",
@@ -14,8 +21,13 @@
     "qrcode-generator": "^2.0.4"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.20.3",
     "@cloudflare/workers-types": "^5.20260808.1",
+    "@playwright/test": "^1.62.1",
+    "@vitest/runner": "^4.1.10",
+    "@vitest/snapshot": "^4.1.10",
     "typescript": "^5.9.3",
+    "vitest": "^4.1.10",
     "wrangler": "^4.120.0"
   }
 }

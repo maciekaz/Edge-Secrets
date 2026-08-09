@@ -16,6 +16,7 @@ Secure, one-time sharing of passwords, files and links - built on Cloudflare Wor
 | **Text secrets** | Zero-knowledge credential sharing - AES-256-GCM, Argon2id key derivation, passphrase in URL hash, burn-on-read |
 | **File sharing** | R2-backed, per-file and total caps admin-configurable in Appearance (defaults 9 GB / 9.5 GB, hard ceiling 50 GB), optional password, download limit, server-enforced TTL |
 | **E2EE file sharing** | Opt-in client-side AES-GCM + Argon2id for files up to 150 MiB. Server stores ciphertext only; passphrase travels in the URL fragment (or out-of-band) and never hits the server |
+| **Device-bound secrets** | Opt-in per secret. The link keeps working after the first read, but only from the browser or security key that opened it first. Lifetime configurable up to 30 days |
 | **URL shortener** | Short links with TTL and click limit, SSRF-safe, unbiased ID generation |
 | **Appearance editor** | Accent colour, background colour, brand name, tagline, logo, storage limits - all globally persistent |
 | **Dark / light mode** | System-detected per client, manually overridable |
@@ -124,6 +125,67 @@ sequenceDiagram
 
 ---
 
+#### Device-bound secrets (opt-in)
+
+By default a secret is destroyed the moment it is read. Some secrets need to stay
+reachable for longer without turning the link into a permanent liability. Setting
+an access mode at creation keeps the link usable, but ties it to whoever opened it
+first.
+
+| Mode | What it binds to | When to use it |
+|---|---|---|
+| One-time read | nothing (default) | Anything that only needs to be seen once |
+| Browser | non-extractable ECDSA key in IndexedDB | The recipient will re-open the link over days |
+| Security key | WebAuthn authenticator | The recipient is known to have a hardware key |
+
+```mermaid
+sequenceDiagram
+    participant R as Recipient
+    participant Server
+
+    R->>Server: retrieve (verifier hash only)
+    Server-->>R: 401 enrol, one-time challenge
+    Note over R: warning shown, then key generated or authenticator registered
+    R->>Server: challenge + public key
+    Server->>Server: atomic claim in D1, factor pinned
+    Server-->>R: ciphertext + __Host- cookie
+
+    Note over R,Server: later reads
+
+    R->>Server: retrieve
+    Server-->>R: 401 prove, one-time challenge
+    R->>Server: signature over the challenge
+    Server->>Server: cookie hash + signature + pinned factor
+    Server-->>R: ciphertext
+```
+
+Both factors are required on every later read. The cookie is deliberately not
+enough on its own: an infostealer that copies the cookie jar off disk defeats
+`HttpOnly` entirely, so the resistance lives in the signing key, which no browser
+API can export.
+
+Binding state lives in D1 rather than KV because claiming a secret has to be
+atomic, and KV has no compare-and-swap. `UPDATE ... WHERE bound_hash IS NULL`
+means exactly one of two simultaneous first readers wins.
+
+**Trade-offs worth knowing before you enable it:**
+
+- Access is tied to a browser profile, not a device. A different browser on the
+  same machine, or a private window, will not get in.
+- Clearing cookies or site data is irreversible. There is no recovery path, by
+  design: if the passphrase could restore access, anyone holding the link could
+  restore it too.
+- The ciphertext stays in KV for the secret's whole lifetime rather than being
+  destroyed on first read. The extended lifetime is only safe because of the
+  binding, so unbound secrets keep the 7-day cap.
+- Synced passkeys (iCloud Keychain, Google Password Manager) are refused in
+  security-key mode. Only device-bound credentials can bind.
+- If the sender allows it, a browser that can produce no key at all falls back to
+  a cookie-only binding. That decision is made once by the first reader and then
+  pinned; no later client can request it.
+
+---
+
 ### Files
 
 Files have two independent modes, chosen per-upload via a toggle on `/gen` → Files:
@@ -227,6 +289,12 @@ sequenceDiagram
 | **Upload size verification** | After multipart complete, the server compares the actual R2 object size against the value declared at init and drops the upload on mismatch. Blocks a declared-small / uploaded-large cap bypass |
 | **Per-file password salt** | File passwords hashed with a per-row random 16-byte salt (`SHA-256(pwd | salt | PEPPER)`), constant-time compared — identical passwords across different files never produce the same digest |
 | **Client-encrypted files (E2EE)** | Opt-in per upload. AES-GCM + Argon2id client-side, server never sees plaintext or key material. Independent Turnstile toggle (`ui:turnstile_files_e2ee`) so a managed challenge can be forced on E2EE downloads without breaking automation on the normal flow |
+| **Device binding (opt-in)** | Two factors, both required: a `__Host-` cookie (`Secure`, `HttpOnly`, `SameSite=Strict`) and a signature from a key the client cannot export. The cookie alone is deliberately insufficient, because an infostealer that copies the cookie jar off disk defeats `HttpOnly` entirely |
+| **Non-extractable device key** | ECDSA P-256 generated with `extractable: false` and stored in IndexedDB. No browser API can export its bytes, so neither injected script nor extension can exfiltrate it. One keypair per secret, so the server never receives an identifier linking a recipient's secrets |
+| **Hardware binding (WebAuthn)** | Alternative factor for high-assurance secrets. Backup-eligible (synced) credentials are rejected on the signed assertion, since a credential present on every device the user owns cannot bind a secret to one of them |
+| **Pinned binding factor** | Whatever the first reader proves possession of is frozen in D1 and enforced verbatim on every later read. A later client can never negotiate a weaker factor, which is what makes the compatibility fallback safe |
+| **Single-use challenges** | Proof-of-possession challenges are consumed by an atomic `DELETE`, so a captured challenge cannot be replayed inside its TTL |
+| **Binding checked before the attempt counter** | An unbound client is refused before its verifier is compared, so a stranger holding the link cannot burn someone else's secret with wrong guesses |
 | **Global Pepper** | File password hashes include a server-side secret; D1 leak doesn't compromise passwords |
 | **Server-side TTL cap** | Backend enforces maximum lifetime; client cannot exceed it |
 | **CF Access + JWT verification** | Protected endpoints guarded at two layers: Cloudflare Access policy + in-Worker RS256 JWT verification against JWKS endpoint (cached 1 h) |
@@ -243,30 +311,22 @@ Every release goes through the layered toolchain below before it is cut. Finding
 
 | Layer | Tool | What it catches | How it's run |
 |---|---|---|---|
-| **Dependency vulnerabilities** | [Snyk Open Source (SCA)](https://snyk.io/product/open-source-security-management/) | Known CVEs in `hono`, `hash-wasm`, `wrangler`, `qrcode-generator` and their transitive deps | `snyk_sca_scan` on every commit; currently 0 issues |
-| **Static code analysis** | [Snyk Code](https://snyk.io/product/snyk-code/) + [Semgrep](https://semgrep.dev) with `p/typescript`, `p/javascript`, `p/owasp-top-ten`, `p/security-audit`, `p/xss`, `p/command-injection` rulesets | SAST — insecure patterns, taint analysis, OWASP Top 10 classes | `semgrep scan` locally before each deploy; currently 0 true positives |
+| **Dependency vulnerabilities** | [Snyk Open Source (SCA)](https://snyk.io/product/open-source-security-management/) | Known CVEs in `hono`, `hash-wasm`, `wrangler`, `qrcode-generator` and their transitive deps | `snyk_sca_scan` on every commit |
+| **Static code analysis** | [Snyk Code](https://snyk.io/product/snyk-code/) + [Semgrep](https://semgrep.dev) with `p/typescript`, `p/javascript`, `p/owasp-top-ten`, `p/security-audit`, `p/xss`, `p/command-injection` rulesets | SAST — insecure patterns, taint analysis, OWASP Top 10 classes | `semgrep scan` locally before each deploy |
 | **Architectural & threat-model review** | [Anthropic Claude Opus 4.7](https://www.anthropic.com/) | Cross-cutting design flaws a rule-based scanner does not see — trust-boundary breaches, endpoint scope / auth gaps, race conditions, protocol misuse between crypto primitives, key / salt reuse, UX flows that silently bypass a control. Used strictly as a reviewer of structure, not as an orchestrator of other tools | Pre-release code walk-through against the full `src/index.ts`, scoped brief to zero-trust invariants and the E2EE boundary |
-| **Dynamic scanning (DAST)** | [OWASP ZAP 2.17.0](https://www.zaproxy.org), seeded with every public endpoint (`/receive/:id`, `/share/:id`, `/s/:id`, `/ui/*`) | Active scan: reflected / persistent / DOM XSS, SQL injection, command injection, path traversal, open redirect, CSRF, insecure cookies, CSP / header audit, SRI, HTTP method manipulation | Run against the live production deploy |
-| **Template-based DAST** | [Nuclei 3.8.0](https://github.com/projectdiscovery/nuclei) with the full public template set (~13k templates) | Known CVEs, exposed files, misconfigurations, default credentials, HTTP header / TLS issues, CSP audit, sensitive-data exposure | `nuclei -list <public-endpoints> -severity critical,high,medium,low -exclude-tags dns,tech,intrusive` against production |
+| **Secret scanning** | [Gitleaks](https://github.com/gitleaks/gitleaks) | Credentials, tokens and keys committed anywhere in the history, not just the working tree | `gitleaks detect` over the full commit history before each release |
+| **Dynamic scanning (DAST)** | [OWASP ZAP](https://www.zaproxy.org), full scan (spider + AJAX spider + active scan) plus a second OpenAPI-seeded API scan covering every public JSON endpoint | Active scan: reflected / persistent / DOM XSS, SQL injection, command injection, path traversal, open redirect, CSRF, insecure cookies, CSP / header audit, SRI, HTTP method manipulation | Run against a local `wrangler dev` deployment, so active/injection probes never touch production data |
+| **Template-based DAST** | [Nuclei](https://github.com/projectdiscovery/nuclei) with the public template set | Known CVEs, exposed files, misconfigurations, default credentials, HTTP header / TLS issues, CSP audit, sensitive-data exposure | `nuclei -list <public-endpoints> -severity critical,high,medium,low -exclude-tags dns,tech,intrusive` against production |
 | **CSP audit** | [Google CSP Evaluator](https://csp-evaluator.withgoogle.com) logic reproduced in `scripts/csp-check.sh` | Missing hardening directives, `'unsafe-inline'`, wildcards, unsafe sources | Part of `npm test`; fails the suite on any new anti-pattern |
 | **Header & invariant suite** | Custom smoke + KV / D1 invariant scripts (`scripts/smoke.sh`, `scripts/kv-invariants.sh`, `scripts/d1-invariants.sh`) | Security-header regression, CF Access gating, stored-state shape (algoVersion, failed_attempts bounds, expiresAt canary for TTL preservation) | Part of `npm test`; run against live production |
 
-Audit scripts and detailed findings live locally (not in the repo) — reach out if you want the artefacts for a specific release.
+Every layer above was re-run for this release: static analysis and secret scanning across the
+source and the full commit history, both dynamic passes against a local `wrangler dev` deployment
+so that active and injection probes never touch production data, and the template scan against the
+production edge. Everything raised is triaged before the release is cut, then either fixed
+in the same release or recorded as an accepted trade-off of the design choices above.
 
-#### v2.0 results
-
-| Layer | Findings | Outcome |
-|---|---|---|
-| Snyk Open Source | 0 | — |
-| Snyk Code | 0 | — |
-| Semgrep | 1 | False positive on the language picker (server-generated HTML from a fixed enum); suppressed |
-| Claude Opus architectural review | 5 | All fixed before release: XSS via filename in inline script, non-E2EE password-hash salt absence, TTL slide on failed verifier attempts, failed-attempts counter race, upload size declared-vs-actual mismatch |
-| OWASP ZAP 2.17.0 | 1 | `Strict-Transport-Security` missing on `text/plain` 404 responses; fixed by the baseline-headers middleware shipped in this release |
-| Nuclei 3.8.0 | 0 | — |
-| CSP directive audit | 0 | — |
-| Header & invariant suite | 0 | — |
-
-All CSP / cookie / header findings reported against `/` or `/robots.txt` by the DAST tools originate from the Cloudflare Access challenge page that the Worker redirects unauthenticated admin traffic to. They are out of scope for this release.
+Audit artefacts are kept outside the repo. Reach out if you want the reports for a specific release.
 
 ---
 
@@ -327,7 +387,7 @@ API endpoints are grouped under `/api/v1/` in two zones. Cloudflare Access needs
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/api/v1/public/secrets/:id/retrieve` | Retrieve and burn secret |
+| `POST` | `/api/v1/public/secrets/:id/retrieve` | Retrieve secret. Burns it on read, or runs the binding handshake for device-bound secrets |
 | `POST` | `/api/v1/public/files/:id/retrieve-ciphertext` | Verify Argon2id verifier and stream the ciphertext for an E2EE file (client decrypts) |
 | `DELETE` | `/api/v1/public/files/:id` | Delete file (uploader self-service) |
 
@@ -492,4 +552,36 @@ TURNSTILE_SECRET=1x0000000000000000000000000000000AA
 ```bash
 npx wrangler dev
 # → http://localhost:8787
+```
+
+#### Tests
+
+```bash
+npm test          # lint + Worker integration tests + smoke / KV / D1 / CSP suites
+npm run test:unit # Worker integration tests only
+
+# browser tests need the KV namespace id from your wrangler.toml, so that the
+# fixtures can be seeded into local storage
+KV_NAMESPACE_ID=<your-kv-namespace-id> npm run test:e2e
+```
+
+`npm run test:unit` runs the real Worker inside workerd with simulated KV, D1 and
+R2, so the binding state machine is exercised through the actual request
+pipeline. `npm run test:e2e` drives Chromium against a local `wrangler dev` and
+uses CDP virtual authenticators for the WebAuthn paths, including the
+backup-eligibility flags, so no physical security key is needed.
+
+Two things about the Playwright setup are easy to get wrong and are pinned in
+`playwright.config.mts`: the dev server must be reached over `localhost` rather
+than `127.0.0.1`, because WebAuthn refuses an IP address as an RP ID, and
+`--local-upstream` must carry the port, otherwise wrangler rewrites the request
+URL to the route in `wrangler.toml` and the origin check correctly rejects the
+browser's assertion.
+
+The D1 tables used by device binding are created from `schema/`, and must be
+applied before deploying a version that offers the feature:
+
+```bash
+npx wrangler d1 execute secret-db --local  --file schema/002_device_bindings.sql
+npx wrangler d1 execute secret-db --remote --file schema/002_device_bindings.sql
 ```

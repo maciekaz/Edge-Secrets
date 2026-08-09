@@ -1,6 +1,6 @@
 import { Hono, type Context, type MiddlewareHandler } from 'hono'
 import { cors } from 'hono/cors'
-import { getCookie } from 'hono/cookie'
+import { getCookie, setCookie } from 'hono/cookie'
 import qrcode from 'qrcode-generator'
 import { getLang, renderLangPicker, LANG_PICKER_CSS, LANG_PICKER_JS, type Translations, type LangCode } from './i18n'
 // Bundled via wrangler's Text rule — returns the minified UMD source as a string.
@@ -12,6 +12,10 @@ const GiB = 1024 * 1024 * 1024
 
 const CONFIG = {
   maxTtl: 604800,
+  // Bound secrets may live longer because repeated access is the point of the
+  // mode, and the ciphertext is unreadable to anyone but the client that
+  // claimed it. Unbound secrets keep the 7-day cap.
+  maxTtlBound: 2592000,
   defaultTtl: 86400,
   maxAttempts: 3,
   // Default storage caps. Admin can override both via `/api/v1/admin/ui/limits`
@@ -27,6 +31,12 @@ const CONFIG = {
   // OOM on mid-range mobile. Not configurable by admin.
   e2eeMaxUpload: 150 * 1024 * 1024,
   visualTtl: 300,
+  // Hard ceiling on re-reads of a bound secret. Not a user-facing "N reads"
+  // feature, just an abuse stop for scripted loops.
+  bindMaxReads: 100,
+  // Lifetime of one challenge. Nonces are single-use, so this only bounds how
+  // long an unused one lingers.
+  bindNonceTtl: 120,
 } as const
 
 // Key-derivation algorithm label stored with each secret. Single-value union
@@ -67,6 +77,21 @@ interface FileRecord {
   algo_version: string | null    // 'argon2id-v1' when encrypted=1
 }
 
+// Access mode requested by the sender. Absent means classic burn-on-read, which
+// is the state of every secret written before this feature. The binding branch
+// is gated on this field, so existing records need no migration.
+type BindMode = 'device' | 'webauthn'
+
+// What the first reader proved possession of. Pinned at bind time and enforced
+// verbatim on every later read: a secret bound with 'ecdsa' never accepts a
+// 'webauthn' proof or a bare cookie. This is what makes the capability fallback
+// safe, since degradation is decided once by the first reader and can never be
+// negotiated by a later client.
+type BoundFactor = 'ecdsa' | 'webauthn' | 'cookie'
+
+// How a request qualified to have its verifier checked on a bound secret.
+type BindStage = 'unclaimed' | 'proven'
+
 interface SecretMetadata {
   verifier: string
   attempts: number
@@ -75,6 +100,23 @@ interface SecretMetadata {
   // with secrets written before this field was introduced — those fall back
   // to the previous TTL-extending behavior until they expire naturally.
   expiresAt?: number
+  // Present only on device-bound secrets. Its absence keeps every pre-existing
+  // secret on the original burn-on-read path.
+  bindMode?: BindMode
+}
+
+interface BindingRecord {
+  secret_id: string
+  mode: string
+  allow_fallback: number
+  bound_factor: string | null
+  bound_hash: string | null
+  pubkey: string | null
+  cred_id: string | null
+  sign_count: number
+  bound_at: number | null
+  expires_at: number
+  read_count: number
 }
 
 interface LinkMetadata {
@@ -90,6 +132,8 @@ interface StoreBody {
   verifier: string
   ttl: string | number
   algoVersion?: AlgoVersion
+  bindMode?: BindMode
+  allowFallback?: boolean
 }
 
 interface UploadInitBody {
@@ -272,6 +316,261 @@ function encodeFilename(filename: string): string {
   return `UTF-8''${encodeURIComponent(filename)}`
 }
 
+// ── Device binding ────────────────────────────────────────────────────────────
+//
+// A bound secret requires two factors, both of them:
+//
+//   1. an opaque cookie token (server stores only its SHA-256)
+//   2. a signature from a key the client cannot export
+//
+// The cookie alone is deliberately insufficient. An infostealer that copies the
+// cookie jar off disk defeats HttpOnly entirely, so the real resistance lives in
+// factor 2: a non-extractable WebCrypto key in IndexedDB ('ecdsa') or a WebAuthn
+// authenticator ('webauthn').
+//
+// If the first reader's browser can do neither, the binding degrades to
+// cookie-only, but only when the sender opted in. The result is recorded
+// permanently in `bound_factor` and cannot be requested by a later client.
+
+// Used with hono's `prefix: 'host'`, which emits `__Host-es_<id>` and forces
+// Secure + Path=/ with no Domain. The prefix stops a sibling subdomain from
+// planting or shadowing the cookie; the per-secret name avoids jar collisions.
+function bindCookieKey(secretId: string): string {
+  return `es_${secretId}`
+}
+
+function b64urlEncode(bytes: Uint8Array): string {
+  let s = ''
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i])
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+function randomToken(): string {
+  return b64urlEncode(crypto.getRandomValues(new Uint8Array(32)))
+}
+
+async function sha256b64url(input: string | Uint8Array): Promise<string> {
+  const data = typeof input === 'string' ? new TextEncoder().encode(input) : input
+  return b64urlEncode(new Uint8Array(await crypto.subtle.digest('SHA-256', data)))
+}
+
+// Single-use challenge. Issued with the 401 that asks the client to prove
+// possession, then consumed by an atomic DELETE where `changes === 1` means this
+// request won the race. A captured challenge cannot be replayed inside its TTL.
+async function issueBindNonce(db: D1Database, secretId: string): Promise<string> {
+  const nonce = randomToken()
+  await db
+    .prepare('INSERT INTO bind_nonces (nonce, secret_id, expires_at) VALUES (?,?,?)')
+    .bind(nonce, secretId, Math.floor(Date.now() / 1000) + CONFIG.bindNonceTtl)
+    .run()
+  return nonce
+}
+
+// Existence probe that decides whether a request may skip Turnstile. Without it
+// anyone could attach a junk nonce and have verifier guesses checked without
+// solving a challenge, which on an unclaimed bound secret is a free run at
+// burning it through the attempt counter.
+async function bindNonceExists(db: D1Database, nonce: unknown, secretId: string): Promise<boolean> {
+  if (typeof nonce !== 'string' || nonce.length < 16 || nonce.length > 128) return false
+  const row = await db
+    .prepare('SELECT 1 AS ok FROM bind_nonces WHERE nonce=? AND secret_id=? AND expires_at>?')
+    .bind(nonce, secretId, Math.floor(Date.now() / 1000))
+    .first<{ ok: number }>()
+  return !!row
+}
+
+async function consumeBindNonce(db: D1Database, nonce: unknown, secretId: string): Promise<boolean> {
+  if (typeof nonce !== 'string' || nonce.length < 16 || nonce.length > 128) return false
+  const res = await db
+    .prepare('DELETE FROM bind_nonces WHERE nonce=? AND secret_id=? AND expires_at>?')
+    .bind(nonce, secretId, Math.floor(Date.now() / 1000))
+    .run()
+  return (res.meta?.changes ?? 0) === 1
+}
+
+// Both factors supply a P-256 public key as SPKI, so one import path covers
+// keys from WebCrypto and from an authenticator alike.
+async function importP256(spkiB64url: string): Promise<CryptoKey | null> {
+  try {
+    return await crypto.subtle.importKey(
+      'spki',
+      b64urlDecode(spkiB64url),
+      { name: 'ECDSA', namedCurve: 'P-256' },
+      false,
+      ['verify']
+    )
+  } catch {
+    return null
+  }
+}
+
+// WebAuthn returns an ASN.1 DER signature; WebCrypto expects raw r||s (P1363).
+// Returns null on malformed input rather than throwing, since a bad signature is
+// an authentication failure and not a server error.
+function derToP1363(der: Uint8Array): Uint8Array | null {
+  if (der.length < 8 || der[0] !== 0x30) return null
+  let off = 2
+  if (der[1] & 0x80) off = 2 + (der[1] & 0x7f)
+
+  const readInt = (): Uint8Array | null => {
+    if (off >= der.length || der[off] !== 0x02) return null
+    off++
+    const len = der[off]
+    off++
+    if (len === 0 || off + len > der.length) return null
+    let v = der.subarray(off, off + len)
+    off += len
+    while (v.length > 32 && v[0] === 0x00) v = v.subarray(1)
+    if (v.length > 32) return null
+    const out = new Uint8Array(32)
+    out.set(v, 32 - v.length)
+    return out
+  }
+
+  const r = readInt()
+  if (!r) return null
+  const s = readInt()
+  if (!s) return null
+  const sig = new Uint8Array(64)
+  sig.set(r, 0)
+  sig.set(s, 32)
+  return sig
+}
+
+// 'ecdsa' factor. WebCrypto already signs in P1363, so the signature needs no
+// reshaping and the signed payload is the raw challenge.
+async function verifyEcdsaProof(
+  pubkeySpki: string,
+  challenge: string,
+  signatureB64url: unknown
+): Promise<boolean> {
+  if (typeof signatureB64url !== 'string' || signatureB64url.length > 512) return false
+  const key = await importP256(pubkeySpki)
+  if (!key) return false
+  try {
+    return await crypto.subtle.verify(
+      { name: 'ECDSA', hash: 'SHA-256' },
+      key,
+      b64urlDecode(signatureB64url),
+      new TextEncoder().encode(challenge)
+    )
+  } catch {
+    return false
+  }
+}
+
+// Flags sit at byte 32 of authenticator data. At registration (attestation
+// 'none') nothing signs them, so a hostile client can lie, but lying only locks
+// the liar out at its own first assertion. The check exists to stop an honest
+// client from binding a syncable passkey and discovering on the next read that
+// the secret is permanently unreadable.
+function authDataBackupEligible(b64url: string): boolean | null {
+  try {
+    const d = b64urlDecode(b64url)
+    if (d.length < 37) return null
+    return (d[32] & 0x08) !== 0
+  } catch {
+    return null
+  }
+}
+
+interface WebauthnAssertion {
+  clientDataJSON?: unknown
+  authenticatorData?: unknown
+  signature?: unknown
+}
+
+// 'webauthn' factor. The backup-eligibility check lives on the assertion rather
+// than on registration: here the authenticator data is covered by the signature
+// about to be verified, so BE=1 (a credential that syncs across devices, the
+// opposite of binding) can be rejected with confidence.
+async function verifyWebauthnProof(
+  pubkeySpki: string,
+  challenge: string,
+  origin: string,
+  rpId: string,
+  storedSignCount: number,
+  assertion: WebauthnAssertion
+): Promise<{ ok: boolean; signCount: number }> {
+  const fail = { ok: false, signCount: storedSignCount }
+  const { clientDataJSON, authenticatorData, signature } = assertion
+  if (
+    typeof clientDataJSON !== 'string' ||
+    typeof authenticatorData !== 'string' ||
+    typeof signature !== 'string' ||
+    clientDataJSON.length > 4096 ||
+    authenticatorData.length > 4096 ||
+    signature.length > 1024
+  ) {
+    return fail
+  }
+
+  let cdBytes: Uint8Array
+  let authData: Uint8Array
+  let sigDer: Uint8Array
+  try {
+    cdBytes = b64urlDecode(clientDataJSON)
+    authData = b64urlDecode(authenticatorData)
+    sigDer = b64urlDecode(signature)
+  } catch {
+    return fail
+  }
+
+  // 1. Client data: type, challenge and origin all pinned.
+  let cd: { type?: unknown; challenge?: unknown; origin?: unknown }
+  try {
+    cd = JSON.parse(new TextDecoder().decode(cdBytes))
+  } catch {
+    return fail
+  }
+  if (cd.type !== 'webauthn.get') return fail
+  if (typeof cd.challenge !== 'string' || !safeCompare(cd.challenge, challenge)) return fail
+  if (cd.origin !== origin) return fail
+
+  // 2. Authenticator data: 32-byte rpIdHash, 1 flag byte, 4-byte counter.
+  if (authData.length < 37) return fail
+  const expectedRpHash = await sha256b64url(rpId)
+  if (!safeCompare(b64urlEncode(authData.subarray(0, 32)), expectedRpHash)) return fail
+
+  const flags = authData[32]
+  const userPresent = (flags & 0x01) !== 0
+  const userVerified = (flags & 0x04) !== 0
+  const backupEligible = (flags & 0x08) !== 0
+  const backupState = (flags & 0x10) !== 0
+  if (!userPresent || !userVerified) return fail
+  // A syncable credential cannot provide device binding, since by design it is
+  // present on every device the user owns.
+  if (backupEligible) return fail
+  // BE=0 with BS=1 is a contradiction the spec forbids; treat as hostile.
+  if (backupState) return fail
+
+  // >>> 0 because JS bitwise operators yield a signed 32-bit int, so a counter
+  // past 2^31 would arrive negative and defeat the monotonicity check below.
+  const signCount =
+    ((authData[33] << 24) | (authData[34] << 16) | (authData[35] << 8) | authData[36]) >>> 0
+  // Many platform authenticators pin this at 0 forever, so monotonicity is only
+  // enforced when the authenticator actually maintains a counter.
+  if (signCount !== 0 && storedSignCount !== 0 && signCount <= storedSignCount) return fail
+
+  // 3. Signature over authenticatorData || SHA-256(clientDataJSON).
+  const sig = derToP1363(sigDer)
+  if (!sig) return fail
+  const key = await importP256(pubkeySpki)
+  if (!key) return fail
+  const cdHash = new Uint8Array(await crypto.subtle.digest('SHA-256', cdBytes))
+  const signed = new Uint8Array(authData.length + cdHash.length)
+  signed.set(authData, 0)
+  signed.set(cdHash, authData.length)
+
+  let ok = false
+  try {
+    ok = await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, key, sig, signed)
+  } catch {
+    return fail
+  }
+  return { ok, signCount: signCount === 0 ? storedSignCount : signCount }
+}
+
 // ── CF Access JWT Verification ────────────────────────────────────────────────
 
 interface JWK {
@@ -410,6 +709,14 @@ app.use('*', async (c, next) => {
   if (!h.has('Referrer-Policy')) {
     h.set('Referrer-Policy', 'no-referrer')
   }
+  // HTML pages carry CORP via HTML_SECURITY_HEADERS, but /ui/* assets and JSON
+  // responses went out bare, letting another origin pull them in as
+  // subresources. Anything that deliberately opted into cross-origin access is
+  // skipped: the CORS-scoped API and the R2 download stream set their own
+  // Access-Control-Allow-Origin, which CORP would undo.
+  if (!h.has('Cross-Origin-Resource-Policy') && !h.has('Access-Control-Allow-Origin')) {
+    h.set('Cross-Origin-Resource-Policy', 'same-origin')
+  }
 })
 
 // ── Routes ────────────────────────────────────────────────────────────────────
@@ -438,10 +745,28 @@ app.get('/receive/:id', async (c) => {
   // is gone. Any pre-cleanup record without algoVersion will fail decrypt at
   // the verifier step (expected — those secrets expired with the 7-day TTL).
   const algoVersion: AlgoVersion = meta?.algoVersion ?? CURRENT_ALGO
+  const bindMode = meta?.bindMode
+
+  // WebAuthn needs `publickey-credentials-get`, which the shared header set
+  // denies. This handler already holds the secret's metadata, so the directive
+  // is relaxed on this page only, and only for secrets that use WebAuthn. /gen,
+  // the admin panel and every ordinary secret stay locked, and
+  // HTML_SECURITY_HEADERS itself is untouched.
+  const headers =
+    bindMode === 'webauthn'
+      ? {
+          ...HTML_SECURITY_HEADERS,
+          'Permissions-Policy': HTML_SECURITY_HEADERS['Permissions-Policy'].replace(
+            'publickey-credentials-get=()',
+            'publickey-credentials-get=(self)'
+          ),
+        }
+      : HTML_SECURITY_HEADERS
+
   return c.html(
-    renderReceiveCred(id, t, code, turnstileActive ? tsSiteKey! : null, algoVersion),
+    renderReceiveCred(id, t, code, turnstileActive ? tsSiteKey! : null, algoVersion, bindMode),
     200,
-    HTML_SECURITY_HEADERS
+    headers
   )
 })
 
@@ -723,29 +1048,277 @@ app.post('/api/v1/admin/secrets', async (c) => {
   // unsupported scheme.
   const algoVersion: AlgoVersion =
     body.algoVersion === 'argon2id-v1' ? body.algoVersion : CURRENT_ALGO
+  // Same defensive shape as algoVersion above: only shipped values are honoured,
+  // anything else falls back to no binding rather than pinning the secret to a
+  // mode the server cannot enforce.
+  const bindMode: BindMode | undefined =
+    body.bindMode === 'device' || body.bindMode === 'webauthn' ? body.bindMode : undefined
+
+  // The extended ceiling is unlocked by the binding, not by the client asking for
+  // it. An unbound secret can never exceed maxTtl whatever ttl is posted.
   const ttlSec = Math.min(
     parseInt(String(body.ttl)) || CONFIG.defaultTtl,
-    CONFIG.maxTtl
+    bindMode ? CONFIG.maxTtlBound : CONFIG.maxTtl
   )
   // Record the absolute expiration so metadata updates on retry (bad verifier
   // path) can preserve the original lifetime instead of sliding it forward.
   const expiresAt = Math.floor(Date.now() / 1000) + ttlSec
+
+  const meta: SecretMetadata = { verifier: body.verifier, attempts: 0, algoVersion, expiresAt }
+  if (bindMode) meta.bindMode = bindMode
+
+  if (bindMode) {
+    // Created here rather than at first read, so a missing row later is
+    // unambiguously an anomaly (fail closed) and not "not yet bound".
+    await c.env.DB.prepare(
+      'INSERT OR REPLACE INTO secret_bindings (secret_id,mode,allow_fallback,bound_factor,bound_hash,pubkey,cred_id,sign_count,bound_at,expires_at,read_count) VALUES (?,?,?,NULL,NULL,NULL,NULL,0,NULL,?,0)'
+    )
+      .bind(body.id, bindMode, body.allowFallback ? 1 : 0, expiresAt)
+      .run()
+  }
+
   await c.env.SECRETS_STORE.put(body.id, body.encryptedData, {
     expirationTtl: ttlSec,
-    metadata: { verifier: body.verifier, attempts: 0, algoVersion, expiresAt } satisfies SecretMetadata,
+    metadata: meta,
   })
   return c.json({ success: true })
 })
 
+// Runs before the verifier is compared. The ordering is load-bearing: a client
+// that is not the bound one must be turned away without touching the attempt
+// counter, otherwise anyone holding the link could burn someone else's secret
+// with three wrong guesses. A bound secret stays reachable for its whole
+// lifetime, so that window would widen from seconds to days.
+//
+// Returns a Response to short-circuit, or a stage marker describing how the
+// request qualified: 'unclaimed' (nobody has bound the secret yet, so the
+// passphrase alone may claim it) or 'proven' (the pinned factor was verified).
+async function handleBoundRetrieve(
+  c: Context<{ Bindings: Bindings }>,
+  id: string,
+  metadata: SecretMetadata,
+  body: RetrieveBody
+): Promise<Response | BindStage> {
+  const row = await c.env.DB.prepare('SELECT * FROM secret_bindings WHERE secret_id=?')
+    .bind(id)
+    .first<BindingRecord>()
+
+  // The row is written when the secret is created, so its absence means the
+  // binding state was lost. Fail closed rather than reverting to an unbound
+  // secret that an attacker could then claim.
+  if (!row || row.mode !== metadata.bindMode) {
+    return c.json({ error: 'BIND_STATE_MISSING' }, 403)
+  }
+
+  // Not yet claimed, so the first reader is entitled to try the passphrase.
+  if (!row.bound_hash) return 'unclaimed'
+
+  // ── Factor 1: the cookie ──
+  const cookie = getCookie(c, bindCookieKey(id), 'host')
+  if (!cookie) return c.json({ error: 'BOUND_TO_OTHER_DEVICE' }, 403)
+  if (!safeCompare(await sha256b64url(cookie), row.bound_hash)) {
+    return c.json({ error: 'BOUND_TO_OTHER_DEVICE' }, 403)
+  }
+
+  // Only once the caller has shown it holds the binding cookie is it safe to
+  // answer questions about this secret's state. Reporting the read ceiling any
+  // earlier would confirm the secret's existence to a stranger.
+  if (row.read_count >= CONFIG.bindMaxReads) {
+    return c.json({ error: 'BIND_READ_LIMIT' }, 429)
+  }
+
+  // A cookie-only binding has no second factor. It was pinned at bind time by
+  // the first reader and cannot be requested by any later client.
+  if (row.bound_factor === 'cookie') return 'proven'
+
+  // ── Factor 2: proof of possession ──
+  if (!body.bindNonce) {
+    const challenge = await issueBindNonce(c.env.DB, id)
+    return c.json(
+      { error: 'BIND_CHALLENGE', challenge, factor: row.bound_factor, credId: row.cred_id ?? undefined },
+      401
+    )
+  }
+
+  // The nonce is consumed atomically, so a captured challenge cannot be replayed
+  // inside its TTL.
+  if (!(await consumeBindNonce(c.env.DB, body.bindNonce, id))) {
+    return c.json({ error: 'BIND_CHALLENGE_INVALID' }, 403)
+  }
+  if (!row.pubkey) return c.json({ error: 'BIND_STATE_MISSING' }, 403)
+
+  if (row.bound_factor === 'ecdsa') {
+    const ok = await verifyEcdsaProof(row.pubkey, body.bindNonce, body.bindSignature)
+    return ok ? 'proven' : c.json({ error: 'BOUND_TO_OTHER_DEVICE' }, 403)
+  }
+
+  if (row.bound_factor === 'webauthn') {
+    const url = new URL(c.req.url)
+    const res = await verifyWebauthnProof(
+      row.pubkey,
+      body.bindNonce,
+      url.origin,
+      url.hostname,
+      row.sign_count,
+      body.bindAssertion ?? {}
+    )
+    if (!res.ok) return c.json({ error: 'BOUND_TO_OTHER_DEVICE' }, 403)
+    if (res.signCount !== row.sign_count) {
+      await c.env.DB.prepare('UPDATE secret_bindings SET sign_count=? WHERE secret_id=?')
+        .bind(res.signCount, id)
+        .run()
+    }
+    return 'proven'
+  }
+
+  return c.json({ error: 'BIND_STATE_MISSING' }, 403)
+}
+
+// Runs only after the verifier matched. Claims the secret for the first reader,
+// or counts a re-read by the already-proven bound client.
+async function finalizeBoundRetrieve(
+  c: Context<{ Bindings: Bindings }>,
+  id: string,
+  value: string,
+  metadata: SecretMetadata,
+  body: RetrieveBody,
+  stage: BindStage
+): Promise<Response> {
+  const row = await c.env.DB.prepare('SELECT * FROM secret_bindings WHERE secret_id=?')
+    .bind(id)
+    .first<BindingRecord>()
+  if (!row) return c.json({ error: 'BIND_STATE_MISSING' }, 403)
+
+  if (row.bound_hash) {
+    // Arriving here via the unclaimed path means a competing request won the
+    // bind between the two reads. That client owns the secret now; this one
+    // proved nothing and must not receive the ciphertext.
+    if (stage !== 'proven') return c.json({ error: 'BOUND_TO_OTHER_DEVICE' }, 403)
+    await c.env.DB.prepare('UPDATE secret_bindings SET read_count=read_count+1 WHERE secret_id=?')
+      .bind(id)
+      .run()
+    // The reader needs to know how long this stays retrievable, since unlike a
+    // one-time secret it survives the tab being closed.
+    return c.json({ encryptedData: value, expiresAt: metadata.expiresAt })
+  }
+
+  // ── First read: claim the secret ──
+  const wantsWebauthn = metadata.bindMode === 'webauthn'
+  const key = body.bindPubKey
+  const hasKey = typeof key === 'string' && key.length > 0 && key.length < 2048
+  const credId = body.bindCredId
+  const hasCred = typeof credId === 'string' && credId.length > 0 && credId.length < 1024
+  // Set by the client once it has tried and failed to produce a key, so the
+  // server can apply the sender's fallback choice.
+  const declaredUnable = body.bindFactor === 'none'
+
+  // Enrolment is a second round trip on purpose. Asking for a key up front would
+  // put every reader of an already-claimed secret through a biometric prompt,
+  // and with WebAuthn leave a junk credential behind, before telling them they
+  // were never getting in.
+  if (!hasKey && !declaredUnable) {
+    const challenge = await issueBindNonce(c.env.DB, id)
+    return c.json({ error: 'BIND_ENROLL', challenge, mode: metadata.bindMode }, 401)
+  }
+
+  // The enrolment round trip skipped Turnstile on the strength of this nonce, so
+  // it has to be genuine and unused.
+  if (!(await consumeBindNonce(c.env.DB, body.bindNonce, id))) {
+    return c.json({ error: 'BIND_CHALLENGE_INVALID' }, 403)
+  }
+
+  // A backup-eligible credential syncs across the user's devices, the opposite
+  // of binding. Caught here rather than at the first read, because by then the
+  // secret would already be bound and unreadable forever.
+  let webauthnUsable = false
+  if (hasKey && wantsWebauthn && hasCred) {
+    const be = typeof body.bindAuthData === 'string' ? authDataBackupEligible(body.bindAuthData) : null
+    if (be === true) return c.json({ error: 'BIND_SYNCED_PASSKEY' }, 400)
+    // be === null means the flags were unreadable. Treat the authenticator as
+    // unusable so the sender's fallback choice decides, rather than binding to
+    // something that was never vetted.
+    webauthnUsable = be === false
+  }
+
+  // The factor is derived from what the client produced, checked against what
+  // the sender asked for, and then frozen. Degradation is decided once by the
+  // first reader and never negotiated by a later one.
+  let factor: BoundFactor
+  let pubkey: string | null = null
+  let storedCred: string | null = null
+
+  if (webauthnUsable) {
+    factor = 'webauthn'
+    pubkey = key!
+    storedCred = credId!
+  } else if (hasKey && !wantsWebauthn) {
+    factor = 'ecdsa'
+    pubkey = key!
+  } else if (row.allow_fallback === 1) {
+    factor = 'cookie'
+  } else {
+    return c.json({ error: 'BIND_UNSUPPORTED' }, 400)
+  }
+
+  // Refuse a key that cannot be imported. Pinning the secret to a public key
+  // that can never verify anything would lock the recipient out permanently.
+  if (pubkey && !(await importP256(pubkey))) {
+    return c.json({ error: 'BIND_UNSUPPORTED' }, 400)
+  }
+
+  const now = Math.floor(Date.now() / 1000)
+  const token = randomToken()
+
+  // Atomic claim. KV has no compare-and-swap, which is why this state lives in
+  // D1: two simultaneous first reads must not both win.
+  const upd = await c.env.DB.prepare(
+    'UPDATE secret_bindings SET bound_factor=?, bound_hash=?, pubkey=?, cred_id=?, bound_at=?, read_count=read_count+1 WHERE secret_id=? AND bound_hash IS NULL'
+  )
+    .bind(factor, await sha256b64url(token), pubkey, storedCred, now, id)
+    .run()
+
+  if ((upd.meta?.changes ?? 0) !== 1) {
+    return c.json({ error: 'BOUND_TO_OTHER_DEVICE' }, 403)
+  }
+
+  setCookie(c, bindCookieKey(id), token, {
+    prefix: 'host',
+    httpOnly: true,
+    sameSite: 'Strict',
+    maxAge: Math.max(60, (metadata.expiresAt ?? now + CONFIG.defaultTtl) - now),
+  })
+
+  return c.json({ encryptedData: value, bound: factor, expiresAt: metadata.expiresAt })
+}
+
+interface RetrieveBody {
+  verifierCandidate: string
+  cfTurnstileToken?: string
+  // Bind handshake (device-bound secrets only)
+  bindPubKey?: string
+  bindCredId?: string
+  bindFactor?: string
+  bindNonce?: string
+  bindSignature?: string
+  bindAuthData?: string
+  bindAssertion?: WebauthnAssertion
+}
+
 // Retrieve encrypted secret from KV (verifier check + burn-on-read)
 app.post('/api/v1/public/secrets/:id/retrieve', async (c) => {
   const id = c.req.param('id')
-  const body = await c.req.json<{ verifierCandidate: string; cfTurnstileToken?: string }>()
+  const body = await c.req.json<RetrieveBody>()
   const { verifierCandidate } = body
+
+  // A proof-carrying request is the second leg of a handshake whose first leg
+  // already satisfied Turnstile. Turnstile tokens are single-use, so demanding a
+  // fresh one here would deadlock the flow. The nonce must be one the server
+  // issued, otherwise an arbitrary string would be a free Turnstile bypass.
+  const carriesProof = await bindNonceExists(c.env.DB, body.bindNonce, id)
 
   // Turnstile verification — runs before any KV access
   const tsEnabled = await c.env.SECRETS_STORE.get('ui:turnstile_creds')
-  if (tsEnabled === '1' && c.env.TURNSTILE_SECRET) {
+  if (!carriesProof && tsEnabled === '1' && c.env.TURNSTILE_SECRET) {
     const token = body.cfTurnstileToken ?? ''
     const ip = c.req.header('CF-Connecting-IP') ?? undefined
     const valid = await verifyTurnstile(token, c.env.TURNSTILE_SECRET, ip)
@@ -755,8 +1328,21 @@ app.post('/api/v1/public/secrets/:id/retrieve', async (c) => {
   const { value, metadata } =
     await c.env.SECRETS_STORE.getWithMetadata<SecretMetadata>(id)
   if (!value || !metadata) {
-    return c.json({ error: 'Link wygasł, lub klucz jest nieprawidłowy' }, 404)
+    // A code rather than a sentence, so the client renders it in the page
+    // language instead of showing a fixed string to every user.
+    return c.json({ error: 'NOT_FOUND' }, 404)
   }
+
+  let bindStage: BindStage = 'unclaimed'
+  if (metadata.bindMode) {
+    const gate = await handleBoundRetrieve(c, id, metadata, body)
+    if (typeof gate !== 'string') return gate
+    // Falls through only when the caller is cleared for the verifier check
+    // below: it either proved possession, or it is the first reader and is
+    // entitled to attempt the bind.
+    bindStage = gate
+  }
+
   if (!safeCompare(metadata.verifier, verifierCandidate)) {
     const attempts = (metadata.attempts ?? 0) + 1
     if (attempts >= CONFIG.maxAttempts) {
@@ -792,6 +1378,13 @@ app.post('/api/v1/public/secrets/:id/retrieve', async (c) => {
     await c.env.SECRETS_STORE.put(id, value, putOpts)
     return c.json({ error: `RETRY_${CONFIG.maxAttempts - attempts}` }, 403)
   }
+
+  // Bound secrets survive the read, which is the point of the mode, so they take
+  // a separate completion path instead of the burn below.
+  if (metadata.bindMode) {
+    return finalizeBoundRetrieve(c, id, value, metadata, body, bindStage)
+  }
+
   await c.env.SECRETS_STORE.delete(id)
   return c.json({ encryptedData: value })
 })
@@ -1231,6 +1824,13 @@ async function handleScheduled(_event: ScheduledEvent, env: Bindings): Promise<v
     await env.BUCKET.delete(f.id)
     await env.DB.prepare('DELETE FROM files WHERE id=?').bind(f.id).run()
   }
+
+  // The secret itself is already gone from KV by the time these expire. Note the
+  // unit difference: `files.expires_at` is in milliseconds, the binding tables
+  // are in seconds, matching KV's expiresAt.
+  const nowSec = Math.floor(Date.now() / 1000)
+  await env.DB.prepare('DELETE FROM secret_bindings WHERE expires_at < ?').bind(nowSec).run()
+  await env.DB.prepare('DELETE FROM bind_nonces WHERE expires_at < ?').bind(nowSec).run()
 }
 
 // ── Export ────────────────────────────────────────────────────────────────────
@@ -1391,6 +1991,7 @@ const CLIENT_JS_BODY = `
         var ctx = JSON.parse(el.textContent);
         if (ctx.L)         window.L           = ctx.L;
         if (ctx.algo)      window.__algo      = ctx.algo;
+        if (ctx.bindMode)  window.__bindMode  = ctx.bindMode;
         if (ctx.fileId)    window.__fileId    = ctx.fileId;
         if (ctx.fileName)  window.__fileName  = ctx.fileName;
         if (typeof ctx.tsRequired === 'boolean') window.__tsRequired = ctx.tsRequired;
@@ -1736,14 +2337,52 @@ const genS  = () => { const v = _randString(_ALPHA_BODY,    15); if (get('body')
 const genK  = () => { const v = _randString(_ALPHA_URL_KEY, 20); if (get('pass')) get('pass').value = v; };
 const genFK = () => { const v = _randString(_ALPHA_URL_KEY, 20); if (get('fpwd')) get('fpwd').value = v; };
 
+// Lifetimes beyond the one-time-read ceiling, offered only once a binding mode
+// is chosen. The server enforces the same rule; pruning the options is a UI
+// courtesy, not the control.
+const _TTL_LONG = [['1209600', 'ttl_14d'], ['2592000', 'ttl_30d']];
+
+function onBindModeChange() {
+    const sel = get('bindMode');
+    const mode = sel ? sel.value : '';
+    const hint = get('bindHint');
+    if (hint) hint.innerText = mode === 'device' ? window.L.bind_hint_device
+        : mode === 'webauthn' ? window.L.bind_hint_webauthn
+        : window.L.bind_hint_none;
+    ['bindFallbackRow', 'bindFallbackHint'].forEach(function(elId) {
+        const el = get(elId);
+        if (el) el.classList.toggle('hidden', !mode);
+    });
+
+    const ttl = get('ttl');
+    if (!ttl) return;
+    Array.prototype.slice.call(ttl.querySelectorAll('option[data-long]')).forEach(function(o){ o.remove(); });
+    if (mode) {
+        _TTL_LONG.forEach(function(pair){
+            const o = document.createElement('option');
+            o.value = pair[0];
+            o.textContent = window.L[pair[1]];
+            o.setAttribute('data-long', '1');
+            ttl.appendChild(o);
+        });
+    } else if (parseInt(ttl.value, 10) > 604800) {
+        // Switching back to one-time reads must not leave a lifetime the
+        // server would silently clamp.
+        ttl.value = '86400';
+    }
+}
+
 async function processStore() {
     const b = get('body').value, p = get('pass').value, ttl = get('ttl').value;
     if (!b || !p) return modal(window.L.js_error, window.L.js_enter_data);
+    const bindSel = get('bindMode');
+    const bindMode = bindSel && bindSel.value ? bindSel.value : undefined;
+    const allowFallback = bindMode ? !!(get('bindFallback') || {}).checked : undefined;
     setL(get('btnGo'), 1);
     try {
         const id = crypto.randomUUID(), key = await derive(p, id, 'k'), iv = crypto.getRandomValues(new Uint8Array(12));
         const enc = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(b)), vf = await derive(p, id, 'v');
-        await fetch('/api/v1/admin/secrets', { method: 'POST', body: JSON.stringify({ id, verifier: vf, ttl, algoVersion: window.__algo || 'argon2id-v1', encryptedData: JSON.stringify({ iv: btoa(String.fromCharCode(...iv)), d: btoa(String.fromCharCode(...new Uint8Array(enc))) }) }) });
+        await fetch('/api/v1/admin/secrets', { method: 'POST', body: JSON.stringify({ id, verifier: vf, ttl, bindMode, allowFallback, algoVersion: window.__algo || 'argon2id-v1', encryptedData: JSON.stringify({ iv: btoa(String.fromCharCode(...iv)), d: btoa(String.fromCharCode(...new Uint8Array(enc))) }) }) });
         get('v-create').classList.add('hidden'); get('v-result').classList.remove('hidden');
         const base = location.origin + '/receive/' + id;
         get('linkS').value = base; get('linkE').value = base + '#' + encodeURIComponent(p);
@@ -1908,7 +2547,7 @@ async function e2eeUnlock() {
         });
         if (!res.ok) {
             const err = await res.json().catch(() => ({}));
-            throw new Error(err.error || ('HTTP ' + res.status));
+            throw new Error(err.error ? _errMsg(err.error) : ('HTTP ' + res.status));
         }
 
         // Stream body with simple progress indicator — Content-Length is set
@@ -1973,17 +2612,215 @@ async function del(id) {
     }
 }
 
+// ── Device binding (client) ─────────────────────────────────────────────────
+// The private key never leaves the browser. For the 'device' factor it is
+// generated non-extractable, so no API can export its bytes and an injected
+// script cannot exfiltrate it the way it could a cookie.
+
+const _IDB_NAME = 'edge-secrets-bind', _IDB_STORE = 'keys';
+
+function _idbReq(r) {
+    return new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+}
+
+function _idbOpen() {
+    return new Promise((res, rej) => {
+        let req;
+        try { req = indexedDB.open(_IDB_NAME, 1); } catch (e) { return rej(e); }
+        req.onupgradeneeded = () => { req.result.createObjectStore(_IDB_STORE); };
+        req.onsuccess = () => res(req.result);
+        req.onerror = () => rej(req.error);
+    });
+}
+
+// One keypair per secret rather than one per browser. A shared key would give
+// the server a stable identifier linking every secret opened here.
+async function _deviceKey(id, create) {
+    const run = async () => {
+        const db = await _idbOpen();
+        let pair = await _idbReq(db.transaction(_IDB_STORE, 'readonly').objectStore(_IDB_STORE).get(id));
+        if (!pair && create) {
+            pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify']);
+            await _idbReq(db.transaction(_IDB_STORE, 'readwrite').objectStore(_IDB_STORE).put(pair, id));
+        }
+        return pair || null;
+    };
+    // Single-flight across tabs. Without it, two tabs opening the same link
+    // both see an empty store, both generate a keypair, and the second put()
+    // overwrites the first, leaving the browser holding a key that does not
+    // match the one the server bound. That is a permanent lockout.
+    if (navigator.locks && navigator.locks.request) {
+        return navigator.locks.request('es-bind-' + id, run);
+    }
+    return run();
+}
+
+function _b64u(buf) {
+    const b = new Uint8Array(buf); let s = '';
+    for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
+    return btoa(s).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
+}
+
+function _b64uDec(s) {
+    const b64 = s.replace(/-/g, '+').replace(/_/g, '/');
+    return Uint8Array.from(atob(b64 + '='.repeat((4 - b64.length % 4) % 4)), c => c.charCodeAt(0));
+}
+
+// Returns the enrolment payload, or {bindFactor:'none'} when this browser
+// cannot produce a key. The server then applies and pins the sender's fallback
+// choice, so this is not a downgrade a later client could request.
+async function _bindEnroll(id, mode, nonce) {
+    if (mode === 'webauthn') {
+        try {
+            if (!window.PublicKeyCredential || !navigator.credentials) return { bindFactor: 'none', bindNonce: nonce };
+            const cred = await navigator.credentials.create({ publicKey: {
+                challenge: _b64uDec(nonce),
+                rp: { name: 'Edge Secrets', id: location.hostname },
+                user: { id: new TextEncoder().encode(id), name: 'secret-' + id.slice(0, 8), displayName: 'Edge Secrets' },
+                pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+                // Discourage resident keys: hardware keys have a small, finite
+                // number of slots, and the credential id is kept server-side.
+                authenticatorSelection: { residentKey: 'discouraged', userVerification: 'required' },
+                attestation: 'none',
+                timeout: 60000,
+            }});
+            const spki = cred && cred.response.getPublicKey && cred.response.getPublicKey();
+            const ad = cred && cred.response.getAuthenticatorData && cred.response.getAuthenticatorData();
+            // Without the authenticator data the server cannot tell a
+            // device-bound credential from a syncable one, so report this
+            // browser as unusable and let the sender's fallback decide.
+            if (!spki || !ad) return { bindFactor: 'none', bindNonce: nonce };
+            return { bindPubKey: _b64u(spki), bindCredId: _b64u(cred.rawId), bindAuthData: _b64u(ad), bindNonce: nonce };
+        } catch (e) { return { bindFactor: 'none', bindNonce: nonce }; }
+    }
+    try {
+        const pair = await _deviceKey(id, true);
+        if (!pair) return { bindFactor: 'none', bindNonce: nonce };
+        return { bindPubKey: _b64u(await crypto.subtle.exportKey('spki', pair.publicKey)), bindNonce: nonce };
+    } catch (e) { return { bindFactor: 'none', bindNonce: nonce }; }
+}
+
+async function _bindProve(id, factor, challenge, credId) {
+    if (factor === 'webauthn') {
+        const assertion = await navigator.credentials.get({ publicKey: {
+            challenge: _b64uDec(challenge),
+            rpId: location.hostname,
+            allowCredentials: credId ? [{ type: 'public-key', id: _b64uDec(credId) }] : undefined,
+            userVerification: 'required',
+            timeout: 60000,
+        }});
+        if (!assertion) throw new Error('BIND_NO_ASSERTION');
+        return { bindNonce: challenge, bindAssertion: {
+            clientDataJSON: _b64u(assertion.response.clientDataJSON),
+            authenticatorData: _b64u(assertion.response.authenticatorData),
+            signature: _b64u(assertion.response.signature),
+        }};
+    }
+    const pair = await _deviceKey(id, false);
+    if (!pair) throw new Error('BOUND_TO_OTHER_DEVICE');
+    const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, pair.privateKey, new TextEncoder().encode(challenge));
+    return { bindNonce: challenge, bindSignature: _b64u(sig) };
+}
+
+// Raised only once the server has confirmed that the passphrase is right and
+// the secret is still unclaimed, so the warning appears when the bind is about
+// to happen rather than speculatively on page load.
+var _bindResolve = null;
+
+function _bindConsent(mode) {
+    const ov = get('bindOv');
+    if (!ov) return Promise.resolve(true);
+    get('bindMsg').innerText = mode === 'webauthn' ? window.L.bind_notice_webauthn : window.L.bind_notice_device;
+    ov.style.display = 'flex';
+    return new Promise(function(resolve){ _bindResolve = resolve; });
+}
+
+function _bindSettle(v) {
+    const ov = get('bindOv');
+    if (ov) ov.style.display = 'none';
+    if (_bindResolve) { const r = _bindResolve; _bindResolve = null; r(v); }
+}
+
+const bindConfirm = () => _bindSettle(true);
+const bindCancel  = () => _bindSettle(false);
+
+// Relative wording ("in 29 days") plus the absolute timestamp. Intl applies the
+// plural rules per locale, which hand-written strings in nine languages would
+// get wrong. The absolute date is both the fallback and the tie-breaker.
+function _fmtUntil(epochSec) {
+    const lang = document.documentElement.lang || 'en';
+    const when = new Date(epochSec * 1000);
+    let rel = '';
+    try {
+        const diff = epochSec - Math.floor(Date.now() / 1000);
+        const rtf = new Intl.RelativeTimeFormat(lang, { numeric: 'auto' });
+        rel = diff >= 86400 ? rtf.format(Math.round(diff / 86400), 'day')
+            : diff >= 3600 ? rtf.format(Math.round(diff / 3600), 'hour')
+            : rtf.format(Math.max(1, Math.round(diff / 60)), 'minute');
+    } catch (e) {}
+    let abs;
+    try { abs = when.toLocaleString(lang); } catch (e) { abs = when.toISOString(); }
+    return rel ? rel + ' (' + abs + ')' : abs;
+}
+
+// Turns server error codes into something a person can act on. Unmapped codes
+// fall through unchanged so a new one stays visible rather than being swallowed,
+// but every code the API emits should be listed here.
+function _errMsg(code) {
+    if (typeof code !== 'string' || !code) return window.L.js_error_occurred;
+
+    // RETRY_n carries the remaining attempt count in the code itself.
+    if (code.indexOf('RETRY_') === 0) {
+        const left = parseInt(code.slice(6), 10);
+        if (isNaN(left)) return window.L.js_err_bad_key;
+        return window.L.js_err_bad_key + ' ' + window.L.js_err_attempts_left.replace('{n}', left);
+    }
+
+    const m = {
+        CHALLENGE_FAILED: window.L.js_err_challenge,
+        TERMINATED: window.L.js_err_terminated,
+        NOT_FOUND: window.L.js_err_not_found,
+        EXPIRED: window.L.js_err_not_found,
+        OBJECT_MISSING: window.L.js_err_not_found,
+        BOUND_TO_OTHER_DEVICE: window.L.js_bind_locked,
+        BIND_UNSUPPORTED: window.L.js_bind_unsupported,
+        BIND_READ_LIMIT: window.L.js_bind_read_limit,
+        BIND_STATE_MISSING: window.L.js_bind_locked,
+        BIND_CHALLENGE_INVALID: window.L.js_bind_retry,
+        BIND_NO_ASSERTION: window.L.js_bind_unsupported,
+        BIND_SYNCED_PASSKEY: window.L.js_bind_synced,
+    };
+    return m[code] || code;
+}
+
 async function start(p, bid) {
     if (!p) return modal(window.L.js_error, window.L.js_nopass);
     setL(get(bid), 1);
     try {
         const id = location.pathname.split('/').pop();
         const vf = await derive(p, id, 'v');
-        const payload = { verifierCandidate: vf };
+        const post = (extra) => fetch('/api/v1/public/secrets/' + id + '/retrieve', {
+            method: 'POST',
+            body: JSON.stringify(Object.assign({ verifierCandidate: vf }, extra || {})),
+        });
+        const payload = {};
         if (_tsToken) payload.cfTurnstileToken = _tsToken;
-        const res = await fetch('/api/v1/public/secrets/' + id + '/retrieve', { method: 'POST', body: JSON.stringify(payload) });
-        const json = await res.json();
-        if (!res.ok) throw new Error(json.error);
+        let res = await post(payload);
+        let json = await res.json();
+
+        // Bound secret, already claimed: prove possession of the pinned factor.
+        if (res.status === 401 && json.error === 'BIND_CHALLENGE') {
+            res = await post(await _bindProve(id, json.factor, json.challenge, json.credId));
+            json = await res.json();
+        // Bound secret, still unclaimed: warn, then enrol this browser as the
+        // owner. Declining leaves the secret untouched and still claimable.
+        } else if (res.status === 401 && json.error === 'BIND_ENROLL') {
+            if (!await _bindConsent(json.mode)) return;
+            res = await post(await _bindEnroll(id, json.mode, json.challenge));
+            json = await res.json();
+        }
+
+        if (!res.ok) throw new Error(_errMsg(json.error));
         const d = JSON.parse(json.encryptedData);
         const key = await derive(p, id, 'k');
         const iv = new Uint8Array(atob(d.iv).split("").map(c => c.charCodeAt(0)));
@@ -1994,11 +2831,21 @@ async function start(p, bid) {
         ['btnM', 'btnA', 'tsWidget'].forEach(id => { const el = get(id); if (el) el.classList.add('hidden'); });
         get('v-decrypted').classList.remove('hidden');
         get('content').innerText = new TextDecoder().decode(dec);
+        // Two clocks, and conflating them is what made the old screen
+        // misleading. The bar counts down to the secret being wiped from the
+        // screen. For a bound secret that is not the same as it being gone,
+        // since it stays retrievable until the expiry stated below.
+        const boundUntil = json.expiresAt || null;
+        if (boundUntil) {
+            const bu = get('bindUntil');
+            if (bu) { bu.innerText = window.L.js_bind_until + _fmtUntil(boundUntil); bu.classList.remove('hidden'); }
+        }
+        const timerLabel = boundUntil ? window.L.js_hide_timer : window.L.js_timer;
         let tl = 300;
         const tick = () => {
             tl--;
             let m = Math.floor(tl / 60), s = tl % 60;
-            get('tText').innerText = window.L.js_timer + m.toString().padStart(2, '0') + ':' + s.toString().padStart(2, '0');
+            get('tText').innerText = timerLabel + m.toString().padStart(2, '0') + ':' + s.toString().padStart(2, '0');
             const p = (tl / 300 * 100);
             const fill = get('tFill');
             fill.style.width = p + '%';
@@ -2007,7 +2854,7 @@ async function start(p, bid) {
         };
         setInterval(tick, 1000);
         tick();
-    } catch (e) { modal(window.L.js_error, e.message); } finally { setL(get(bid), 0); }
+    } catch (e) { modal(window.L.js_error, _errMsg(e.message)); } finally { setL(get(bid), 0); }
 }
 
 var _tsToken = null;
@@ -2059,6 +2906,7 @@ var __ACTIONS = {
     genK: function(){ genK(); },
     genFK: function(){ genFK(); },
     processStore: function(){ processStore(); },
+    onBindModeChange: function(){ onBindModeChange(); },
 
     // File upload
     showFile: function(){ showFile(); },
@@ -2078,6 +2926,8 @@ var __ACTIONS = {
     // Secret retrieval page
     unlockM: function(){ unlockM(); },
     unlockA: function(){ unlockA(); },
+    bindConfirm: function(){ bindConfirm(); },
+    bindCancel: function(){ bindCancel(); },
 
     // E2EE file retrieval page
     e2eeUnlock: function(){ e2eeUnlock(); },
@@ -2173,7 +3023,19 @@ function renderGen(type: string, t: Translations, langCode: LangCode): string {
           <div class="label-row"><span>${t.label_encrypt_key}</span><span class="action-link" data-click="genK">${t.action_gen_key}</span></div>
           <input type="text" id="pass" placeholder="${t.placeholder_encrypt}">
           <div class="label-row"><span>${t.label_ttl}</span></div>
-          <select id="ttl"><option value="3600">${t.ttl_1h}</option><option value="86400" selected>${t.ttl_24h}</option><option value="259200">${t.ttl_72h}</option></select>
+          <select id="ttl"><option value="3600">${t.ttl_1h}</option><option value="21600">${t.ttl_6h}</option><option value="43200">${t.ttl_12h}</option><option value="86400" selected>${t.ttl_24h}</option><option value="259200">${t.ttl_72h}</option><option value="604800">${t.ttl_7d}</option></select>
+          <div class="label-row" style="margin-top:14px"><span>${t.bind_label}</span></div>
+          <select id="bindMode" data-change="onBindModeChange">
+              <option value="" selected>${t.bind_mode_none}</option>
+              <option value="device">${t.bind_mode_device}</option>
+              <option value="webauthn">${t.bind_mode_webauthn}</option>
+          </select>
+          <div id="bindHint" style="font-size:0.6rem; color:var(--text-muted); line-height:1.5; margin:6px 0 4px">${t.bind_hint_none}</div>
+          <div class="ts-toggle-row hidden" id="bindFallbackRow" style="margin-top:10px; margin-bottom:4px">
+              <span class="cfg-label">${t.bind_fallback_label}</span>
+              <label class="ts-toggle"><input type="checkbox" id="bindFallback" checked><span class="ts-track"></span><span class="ts-thumb"></span></label>
+          </div>
+          <div id="bindFallbackHint" class="hidden" style="font-size:0.6rem; color:var(--text-muted); line-height:1.5; margin-bottom:12px">${t.bind_fallback_hint}</div>
           <button class="btn" data-click="processStore" id="btnGo"><span>${t.btn_generate_links}</span><div class="spinner"></div></button>
       </div>
       <div id="v-result" class="hidden">
@@ -2353,7 +3215,7 @@ function renderGen(type: string, t: Translations, langCode: LangCode): string {
   return BASE_HTML(body, langCode, lp)
 }
 
-function renderReceiveCred(_id: string, lang: Lang, langCode: LangCode, turnstileSiteKey: string | null, algoVersion: AlgoVersion): string {
+function renderReceiveCred(_id: string, lang: Lang, langCode: LangCode, turnstileSiteKey: string | null, algoVersion: AlgoVersion, bindMode?: BindMode): string {
   const lp = renderLangPicker(langCode)
   const tsWidget = turnstileSiteKey
     ? `<div id="tsWidget" class="ts-verify-wrap"><span class="ts-verify-label">${lang.ts_verify}</span><div class="cf-turnstile" data-sitekey="${escapeHtml(turnstileSiteKey)}" data-callback="onTurnstileSuccess" data-theme="auto"></div></div>`
@@ -2361,8 +3223,21 @@ function renderReceiveCred(_id: string, lang: Lang, langCode: LangCode, turnstil
   const tsScript = turnstileSiteKey
     ? `<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" defer></script>`
     : ''
+  // Consent gate for the irreversible bind. Deliberately not rendered inline on
+  // page load, where it is not yet known whether the passphrase is correct or
+  // the secret still unclaimed. The server reports both via BIND_ENROLL, so the
+  // warning appears exactly once, at the moment the bind is about to happen.
+  const bindGate = bindMode
+    ? `<div id="bindOv" class="overlay"><div class="modal">
+      <div style="font-size:34px; line-height:1; margin-bottom:14px; color:var(--accent)">!</div>
+      <h3 id="bindT" style="margin-bottom:14px">${lang.bind_confirm_title}</h3>
+      <p id="bindMsg" style="font-size:0.78rem; line-height:1.6; text-align:left"></p>
+      <button class="modal-btn" data-click="bindConfirm">${lang.bind_confirm_yes}</button>
+      <button class="modal-btn" data-click="bindCancel" style="background:transparent; color:var(--text); border:1px solid var(--border-strong); margin-top:10px">${lang.bind_confirm_no}</button>
+    </div></div>`
+    : ''
   const body = `
-  <script type="application/json" id="__ctx__">${jsonEmbed({ L: lang, algo: algoVersion })}</script>
+  <script type="application/json" id="__ctx__">${jsonEmbed({ L: lang, algo: algoVersion, bindMode: bindMode ?? null })}</script>
   <script src="/ui/argon2.v1.js"></script>
   <div class="card">
     <div class="brand-header"><span class="brand-logo">EDGE SECRETS</span></div>
@@ -2384,9 +3259,10 @@ function renderReceiveCred(_id: string, lang: Lang, langCode: LangCode, turnstil
           <div class="timer-wrap" style="height:28px; margin-bottom:0;"><div id="tFill" class="timer-fill"></div></div>
           <div id="tText" class="timer-text" style="top:0; line-height:28px;"></div>
       </div>
+      <div id="bindUntil" class="hidden" style="font-size:0.68rem; color:var(--text-muted); margin-top:12px; text-align:center; letter-spacing:0.04em; line-height:1.5"></div>
       <button class="btn" style="margin-top:20px;" data-click="copyContent"><span>${lang.btn_copy}</span></button>
     </div>
-  </div><div id="ov" class="overlay"><div class="modal"><h3 id="mT"></h3><p id="mMsg"></p><button class="modal-btn" data-click="closeOverlay" data-target="ov">OK</button></div></div>`
+  </div><div id="ov" class="overlay"><div class="modal"><h3 id="mT"></h3><p id="mMsg"></p><button class="modal-btn" data-click="closeOverlay" data-target="ov">OK</button></div></div>${bindGate}`
   return BASE_HTML(body, langCode, lp, tsScript)
 }
 

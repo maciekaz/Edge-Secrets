@@ -8,3 +8,7 @@ scripts/
 do_not_share_auth!/
 .DS_Store
 **/.DS_Store
+
+# Playwright artefacts
+test-results/
+playwright-report/
