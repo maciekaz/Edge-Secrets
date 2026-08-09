@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
 import { randomUUID } from 'node:crypto'
-import { readBinding, seedBoundSecret } from './seed.mjs'
+import { readBinding, readSecret, seedBoundSecret } from './seed.mjs'
 
 const PASSPHRASE = 'E2E-Test-Key-2026'
 
@@ -177,5 +177,69 @@ test.describe('webauthn binding (CDP virtual authenticator)', () => {
     await expect(page.locator('#ov')).toBeVisible()
     await expect(page.locator('#v-decrypted')).toBeHidden()
     expect(readBinding(id).bound_factor).toBeNull()
+  })
+})
+
+test.describe('destruction by the recipient', () => {
+  test('is offered only after a bound secret has been opened', async ({ page }) => {
+    const id = randomUUID()
+    await seedBoundSecret({ id, passphrase: PASSPHRASE, bindMode: 'device' })
+
+    await openSecret(page, id)
+    await expect(page.locator('#forgetRow')).toBeHidden()
+
+    await unlockAndConsent(page)
+    await expect(page.locator('#v-decrypted')).toBeVisible()
+    await expect(page.locator('#btnForget')).toBeVisible()
+  })
+
+  test('takes two clicks, and the first one destroys nothing', async ({ page }) => {
+    const id = randomUUID()
+    await seedBoundSecret({ id, passphrase: PASSPHRASE, bindMode: 'device' })
+
+    await openSecret(page, id)
+    await unlockAndConsent(page)
+    await page.locator('#btnForget').click()
+
+    await expect(page.locator('#btnForget')).toHaveClass(/armed/)
+    expect(readSecret(id)).not.toBeNull()
+  })
+
+  test('destroys the secret for good, signing a fresh challenge to do it', async ({ page }) => {
+    const id = randomUUID()
+    await seedBoundSecret({ id, passphrase: PASSPHRASE, bindMode: 'device' })
+
+    await openSecret(page, id)
+    await unlockAndConsent(page)
+    await page.locator('#btnForget').click()
+    await page.locator('#btnForget').click()
+
+    await expect(page.locator('#ov')).toBeVisible()
+    await expect(page.locator('#v-decrypted')).toBeHidden()
+    expect(readSecret(id)).toBeNull()
+    expect(readBinding(id)).toBeNull()
+
+    // The link is dead for the browser that just destroyed it, not merely for
+    // everyone else. Nothing about holding the binding brings it back.
+    await openSecret(page, id)
+    await page.locator('#btnA').click()
+    await expect(page.locator('#ov')).toBeVisible()
+    await expect(page.locator('#v-decrypted')).toBeHidden()
+  })
+
+  test('works for a WebAuthn-bound secret too', async ({ page }) => {
+    const id = randomUUID()
+    await seedBoundSecret({ id, passphrase: PASSPHRASE, bindMode: 'webauthn' })
+    await addAuthenticator(page, false)
+
+    await openSecret(page, id)
+    await unlockAndConsent(page)
+    await expect(page.locator('#v-decrypted')).toBeVisible()
+
+    await page.locator('#btnForget').click()
+    await page.locator('#btnForget').click()
+
+    await expect(page.locator('#ov')).toBeVisible()
+    expect(readSecret(id)).toBeNull()
   })
 })

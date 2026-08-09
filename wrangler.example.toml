@@ -32,3 +32,15 @@ crons = ["0 * * * *"]
 type = "Text"
 globs = ["**/argon2.umd.min.js"]
 fallthrough = true
+
+# EFF Long and BIP-39 passphrase wordlists.
+[[rules]]
+type = "Text"
+globs = ["**/*-wordlist.txt"]
+fallthrough = true
+
+# QR encoder, served to the browser at /ui/qrcode.v1.js.
+[[rules]]
+type = "Text"
+globs = ["**/qrcode-vendor.js"]
+fallthrough = true

@@ -10,6 +10,51 @@ export async function applySchema() {
   await env.DB.exec(
     'CREATE TABLE IF NOT EXISTS bind_nonces (nonce TEXT PRIMARY KEY, secret_id TEXT NOT NULL, expires_at INTEGER NOT NULL)'
   )
+  await env.DB.exec(
+    'CREATE TABLE IF NOT EXISTS sent_secrets (secret_id TEXT PRIMARY KEY, owner_hash TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, purge_at INTEGER NOT NULL, bind_mode TEXT, status TEXT NOT NULL DEFAULT \'pending\', first_opened_at INTEGER, last_opened_at INTEGER, open_count INTEGER NOT NULL DEFAULT 0, failed_attempts INTEGER NOT NULL DEFAULT 0, revoked_at INTEGER)'
+  )
+}
+
+/**
+ * Mints CF Access JWTs and serves the matching JWKS, so the admin endpoints can
+ * be exercised as a specific signed-in user. Without this the ownership checks
+ * could only be asserted at the SQL level, never through the real middleware.
+ */
+export async function makeAccessIssuer(teamDomain: string, aud: string) {
+  const kid = 'test-key-1'
+  const kp = (await crypto.subtle.generateKey(
+    { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
+    true,
+    ['sign', 'verify']
+  )) as CryptoKeyPair
+  const { key_ops: _ops, ext: _ext, ...jwk } = (await crypto.subtle.exportKey(
+    'jwk',
+    kp.publicKey
+  )) as JsonWebKey
+  const certs = JSON.stringify({ keys: [{ ...jwk, kid, alg: 'RS256', use: 'sig' }] })
+
+  const b64uStr = (s: string) => b64u(new TextEncoder().encode(s))
+
+  return {
+    certs,
+    async token(claims: { sub?: string; email?: string; common_name?: string; exp?: number } = {}) {
+      const header = b64uStr(JSON.stringify({ alg: 'RS256', kid, typ: 'JWT' }))
+      const payload = b64uStr(
+        JSON.stringify({
+          aud,
+          iss: `https://${teamDomain}`,
+          exp: claims.exp ?? Math.floor(Date.now() / 1000) + 3600,
+          ...claims,
+        })
+      )
+      const sig = await crypto.subtle.sign(
+        'RSASSA-PKCS1-v1_5',
+        kp.privateKey,
+        new TextEncoder().encode(`${header}.${payload}`)
+      )
+      return `${header}.${payload}.${b64u(sig)}`
+    },
+  }
 }
 
 export function b64u(buf: ArrayBuffer | Uint8Array): string {

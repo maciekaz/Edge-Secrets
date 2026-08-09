@@ -82,10 +82,44 @@ export async function seedBoundSecret({ id, passphrase, bindMode, allowFallback 
   return { verifier, expiresAt }
 }
 
+/**
+ * Reads the ciphertext back out of KV, or null once the secret is destroyed.
+ * A missing key is not an error to wrangler: it prints "Value not found" on
+ * stdout and still exits 0, so the absence has to be matched on the text.
+ */
+export function readSecret(id) {
+  try {
+    const out = wrangler(['kv', 'key', 'get', id, '--namespace-id', NS, '--local'])
+    return /^\s*Value not found\s*$/.test(out) ? null : out
+  } catch {
+    return null
+  }
+}
+
 export function readBinding(id) {
   const out = wrangler([
     'd1', 'execute', 'secret-db', '--local', '--json', '--command',
     `SELECT mode,bound_factor,cred_id,read_count FROM secret_bindings WHERE secret_id='${id}'`,
   ])
   return JSON.parse(out)[0].results[0] ?? null
+}
+
+/** Same as seedBoundSecret but unbound, with caller-supplied plaintext. */
+export async function seedSecretWithBody({ id, passphrase, body, ttl = 3600 }) {
+  const verifier = await deriveVerifier(passphrase, id)
+  const expiresAt = Math.floor(Date.now() / 1000) + ttl
+  const metadata = JSON.stringify({
+    verifier,
+    attempts: 0,
+    algoVersion: 'argon2id-v1',
+    expiresAt,
+  })
+  const value = await encryptFor(passphrase, id, body)
+  wrangler([
+    'kv', 'key', 'put', id, value,
+    '--namespace-id', NS, '--local',
+    '--metadata', metadata,
+    '--ttl', String(ttl),
+  ])
+  return { verifier, expiresAt }
 }

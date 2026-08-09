@@ -81,6 +81,7 @@ export interface Translations {
   // ── QR modal ──
   qr_title: string
   qr_close: string
+  qr_failed: string
 
   // ── Client-side JS strings (passed via window.L) ──
   js_copied: string
@@ -184,6 +185,43 @@ export interface Translations {
   js_err_terminated: string
   js_err_not_found: string
   js_bind_synced: string
+  reveal_hold: string
+  reveal_visible: string
+  reveal_a11y_hint: string
+  sent_title: string
+  sent_loading: string
+  sent_empty: string
+  sent_error: string
+  sent_col_created: string
+  sent_status_pending: string
+  sent_status_opened: string
+  sent_status_expired: string
+  sent_status_revoked: string
+  sent_status_forgotten: string
+  sent_status_burned: string
+  sent_opens: string
+  sent_failed: string
+  sent_revoke: string
+  sent_revoke_confirm: string
+  sent_propagation: string
+  forget_btn: string
+  forget_confirm: string
+  forget_done: string
+  forget_error: string
+  gen_mode_label: string
+  gen_mode_nist: string
+  gen_mode_eff: string
+  gen_mode_bip39: string
+  gen_mode_legacy: string
+  gen_mode_key256: string
+  gen_mode_key512: string
+  gen_entropy: string
+  gen_wordlist_failed: string
+  sent_status_label: string
+  sent_signed_in: string
+  sent_hint: string
+  forget_note: string
+  js_err_id_taken: string
 }
 
 // ── Translations ────────────────────────────────────────────────────────────
@@ -261,6 +299,7 @@ export const I18N: Record<LangCode, Translations> = {
 
     qr_title: 'QR CODE',
     qr_close: 'CLOSE',
+    qr_failed: 'The QR code could not be generated. Refresh the page and try again, or copy the link instead.',
 
     js_copied: 'Copied!',
     js_manual: 'Copy manually: ',
@@ -355,6 +394,43 @@ export const I18N: Record<LangCode, Translations> = {
     js_err_terminated: 'Too many failed attempts. The secret has been permanently destroyed. Ask the sender for a new link.',
     js_err_not_found: 'This link has expired, was already used, or the key is wrong.',
     js_bind_synced: 'That is a synced passkey. It exists on every device linked to your account, so it cannot lock this secret to one device. Use a hardware security key, or a device-bound authenticator. Refresh the page before trying again with a different authenticator.',
+    reveal_hold: 'HOLD TO REVEAL',
+    reveal_visible: 'VISIBLE',
+    reveal_a11y_hint: 'Hold this button, or press and hold Space or Enter, to reveal the content. It hides again as soon as you let go. Copying to the clipboard works without revealing anything.',
+    sent_title: 'Sent secrets',
+    sent_loading: 'Loading...',
+    sent_empty: 'You have not sent any secrets yet.',
+    sent_error: 'Could not load the list.',
+    sent_col_created: 'Created',
+    sent_status_pending: 'Not opened',
+    sent_status_opened: 'Opened',
+    sent_status_expired: 'Expired unopened',
+    sent_status_revoked: 'Revoked',
+    sent_status_forgotten: 'Destroyed by recipient',
+    sent_status_burned: 'Destroyed after wrong keys',
+    sent_opens: 'opens',
+    sent_failed: 'failed attempts',
+    sent_revoke: 'Revoke',
+    sent_revoke_confirm: 'Click again to confirm',
+    sent_propagation: 'Revoking destroys the secret immediately. It can take up to a minute to reach every Cloudflare edge location.',
+    forget_btn: 'Destroy now',
+    forget_confirm: 'Click again to destroy permanently',
+    forget_done: 'The secret has been destroyed. This link no longer works, for you or for anyone else.',
+    forget_error: 'Could not destroy the secret. Refresh the page and try again.',
+    gen_mode_label: 'Password standard',
+    gen_mode_nist: 'NIST SP 800-63B (20 chars)',
+    gen_mode_eff: 'Memorable, EFF list (6 words)',
+    gen_mode_bip39: 'Memorable, BIP-39 list (12 words)',
+    gen_mode_legacy: 'Legacy corporate (12 chars)',
+    gen_mode_key256: 'API key, 256-bit (Base64)',
+    gen_mode_key512: 'API key, 512-bit (Base64)',
+    gen_entropy: 'About {n} bits of entropy.',
+    gen_wordlist_failed: 'The wordlist could not be loaded, so no passphrase was generated. Check your connection and try again, or pick another standard.',
+    sent_status_label: 'Status',
+    sent_signed_in: 'Signed in as',
+    sent_hint: 'Secrets created from this account. Revoking one destroys it immediately, for everyone.',
+    forget_note: 'Done with it? End access now instead of waiting for it to expire.',
+    js_err_id_taken: 'That identifier is already in use by another account. Nothing was saved. Try again to get a new one.',
   },
 
   // ────────────────────────── Polski ──────────────────────────
@@ -428,6 +504,7 @@ export const I18N: Record<LangCode, Translations> = {
 
     qr_title: 'KOD QR',
     qr_close: 'ZAMKNIJ',
+    qr_failed: 'Nie udało się wygenerować kodu QR. Odśwież stronę i spróbuj ponownie lub skopiuj link.',
 
     js_copied: 'Skopiowano!',
     js_manual: 'Skopiuj ręcznie: ',
@@ -522,6 +599,43 @@ export const I18N: Record<LangCode, Translations> = {
     js_err_terminated: 'Zbyt wiele nieudanych prób. Sekret został trwale zniszczony. Poproś nadawcę o nowy link.',
     js_err_not_found: 'Ten link wygasł, został już wykorzystany albo klucz jest nieprawidłowy.',
     js_bind_synced: 'To jest passkey synchronizowany. Istnieje na każdym urządzeniu powiązanym z Twoim kontem, więc nie może związać tego sekretu z jednym urządzeniem. Użyj sprzętowego klucza bezpieczeństwa lub authenticatora powiązanego z urządzeniem. Odśwież stronę, zanim spróbujesz ponownie innym authenticatorem.',
+    reveal_hold: 'PRZYTRZYMAJ, ABY POKAZAĆ',
+    reveal_visible: 'WIDOCZNE',
+    reveal_a11y_hint: 'Przytrzymaj ten przycisk albo klawisz Spacja lub Enter, aby odsłonić treść. Zostanie ukryta natychmiast po puszczeniu. Kopiowanie do schowka działa bez odsłaniania.',
+    sent_title: 'Wysłane sekrety',
+    sent_loading: 'Wczytywanie...',
+    sent_empty: 'Nie wysłałeś jeszcze żadnego sekretu.',
+    sent_error: 'Nie udało się wczytać listy.',
+    sent_col_created: 'Utworzono',
+    sent_status_pending: 'Nieotwarty',
+    sent_status_opened: 'Otwarty',
+    sent_status_expired: 'Wygasł nieotwarty',
+    sent_status_revoked: 'Odwołany',
+    sent_status_forgotten: 'Zniszczony przez odbiorcę',
+    sent_status_burned: 'Zniszczony po błędnych kluczach',
+    sent_opens: 'otwarcia',
+    sent_failed: 'nieudane próby',
+    sent_revoke: 'Odwołaj',
+    sent_revoke_confirm: 'Kliknij ponownie, aby potwierdzić',
+    sent_propagation: 'Odwołanie niszczy sekret natychmiast. Dotarcie do wszystkich lokalizacji brzegowych Cloudflare może zająć do minuty.',
+    forget_btn: 'Zniszcz teraz',
+    forget_confirm: 'Kliknij ponownie, aby trwale zniszczyć',
+    forget_done: 'Sekret został zniszczony. Ten link nie działa już ani dla Ciebie, ani dla nikogo innego.',
+    forget_error: 'Nie udało się zniszczyć sekretu. Odśwież stronę i spróbuj ponownie.',
+    gen_mode_label: 'Standard hasła',
+    gen_mode_nist: 'NIST SP 800-63B (20 znaków)',
+    gen_mode_eff: 'Do zapamiętania, lista EFF (6 słów)',
+    gen_mode_bip39: 'Do zapamiętania, lista BIP-39 (12 słów)',
+    gen_mode_legacy: 'Korporacyjny legacy (12 znaków)',
+    gen_mode_key256: 'Klucz API, 256 bitów (Base64)',
+    gen_mode_key512: 'Klucz API, 512 bitów (Base64)',
+    gen_entropy: 'Około {n} bitów entropii.',
+    gen_wordlist_failed: 'Nie udało się wczytać listy słów, więc hasło nie zostało wygenerowane. Sprawdź połączenie i spróbuj ponownie lub wybierz inny standard.',
+    sent_status_label: 'Status',
+    sent_signed_in: 'Zalogowano jako',
+    sent_hint: 'Sekrety utworzone z tego konta. Odwołanie niszczy sekret natychmiast, dla wszystkich.',
+    forget_note: 'Skończyłeś? Zakończ dostęp teraz, zamiast czekać na wygaśnięcie.',
+    js_err_id_taken: 'Ten identyfikator należy już do innego konta. Nic nie zostało zapisane. Spróbuj ponownie, aby otrzymać nowy.',
   },
 
   // ────────────────────────── Deutsch ──────────────────────────
@@ -595,6 +709,7 @@ export const I18N: Record<LangCode, Translations> = {
 
     qr_title: 'QR-CODE',
     qr_close: 'SCHLIEßEN',
+    qr_failed: 'Der QR-Code konnte nicht erzeugt werden. Laden Sie die Seite neu und versuchen Sie es erneut, oder kopieren Sie den Link.',
 
     js_copied: 'Kopiert!',
     js_manual: 'Manuell kopieren: ',
@@ -689,6 +804,43 @@ export const I18N: Record<LangCode, Translations> = {
     js_err_terminated: 'Zu viele Fehlversuche. Das Geheimnis wurde endgültig vernichtet. Bitten Sie den Absender um einen neuen Link.',
     js_err_not_found: 'Dieser Link ist abgelaufen, wurde bereits verwendet, oder der Schlüssel ist falsch.',
     js_bind_synced: 'Das ist ein synchronisierter Passkey. Er existiert auf jedem mit Ihrem Konto verknüpften Gerät und kann dieses Geheimnis daher nicht an ein Gerät binden. Verwenden Sie einen Hardware-Sicherheitsschlüssel oder einen gerätegebundenen Authenticator. Laden Sie die Seite neu, bevor Sie es mit einem anderen Authenticator erneut versuchen.',
+    reveal_hold: 'GEDRÜCKT HALTEN ZUM ANZEIGEN',
+    reveal_visible: 'SICHTBAR',
+    reveal_a11y_hint: 'Halten Sie diese Schaltfläche oder die Leer- bzw. Eingabetaste gedrückt, um den Inhalt anzuzeigen. Er wird sofort nach dem Loslassen wieder verborgen. Das Kopieren in die Zwischenablage funktioniert, ohne etwas anzuzeigen.',
+    sent_title: 'Gesendete Geheimnisse',
+    sent_loading: 'Wird geladen...',
+    sent_empty: 'Sie haben noch keine Geheimnisse gesendet.',
+    sent_error: 'Die Liste konnte nicht geladen werden.',
+    sent_col_created: 'Erstellt',
+    sent_status_pending: 'Nicht geöffnet',
+    sent_status_opened: 'Geöffnet',
+    sent_status_expired: 'Ungeöffnet abgelaufen',
+    sent_status_revoked: 'Widerrufen',
+    sent_status_forgotten: 'Vom Empfänger vernichtet',
+    sent_status_burned: 'Nach falschen Schlüsseln vernichtet',
+    sent_opens: 'Zugriffe',
+    sent_failed: 'Fehlversuche',
+    sent_revoke: 'Widerrufen',
+    sent_revoke_confirm: 'Zum Bestätigen erneut klicken',
+    sent_propagation: 'Der Widerruf vernichtet das Geheimnis sofort. Bis alle Cloudflare-Standorte erreicht sind, kann es bis zu einer Minute dauern.',
+    forget_btn: 'Jetzt vernichten',
+    forget_confirm: 'Zum endgültigen Vernichten erneut klicken',
+    forget_done: 'Das Geheimnis wurde vernichtet. Dieser Link funktioniert weder für Sie noch für andere.',
+    forget_error: 'Das Geheimnis konnte nicht vernichtet werden. Laden Sie die Seite neu und versuchen Sie es erneut.',
+    gen_mode_label: 'Passwortstandard',
+    gen_mode_nist: 'NIST SP 800-63B (20 Zeichen)',
+    gen_mode_eff: 'Merkbar, EFF-Liste (6 Wörter)',
+    gen_mode_bip39: 'Merkbar, BIP-39-Liste (12 Wörter)',
+    gen_mode_legacy: 'Legacy-Unternehmen (12 Zeichen)',
+    gen_mode_key256: 'API-Schlüssel, 256 Bit (Base64)',
+    gen_mode_key512: 'API-Schlüssel, 512 Bit (Base64)',
+    gen_entropy: 'Etwa {n} Bit Entropie.',
+    gen_wordlist_failed: 'Die Wortliste konnte nicht geladen werden, daher wurde kein Passwort erzeugt. Prüfen Sie die Verbindung und versuchen Sie es erneut, oder wählen Sie einen anderen Standard.',
+    sent_status_label: 'Status',
+    sent_signed_in: 'Angemeldet als',
+    sent_hint: 'Über dieses Konto erstellte Geheimnisse. Ein Widerruf vernichtet das Geheimnis sofort, für alle.',
+    forget_note: 'Fertig? Beenden Sie den Zugriff jetzt, statt auf den Ablauf zu warten.',
+    js_err_id_taken: 'Diese Kennung gehört bereits zu einem anderen Konto. Es wurde nichts gespeichert. Versuchen Sie es erneut für eine neue Kennung.',
   },
 
   // ────────────────────────── Français ──────────────────────────
@@ -762,6 +914,7 @@ export const I18N: Record<LangCode, Translations> = {
 
     qr_title: 'CODE QR',
     qr_close: 'FERMER',
+    qr_failed: 'Le code QR n’a pas pu être généré. Actualisez la page et réessayez, ou copiez le lien.',
 
     js_copied: 'Copié !',
     js_manual: 'Copier manuellement : ',
@@ -856,6 +1009,43 @@ export const I18N: Record<LangCode, Translations> = {
     js_err_terminated: 'Trop de tentatives échouées. Le secret a été détruit définitivement. Demandez un nouveau lien à l\'expéditeur.',
     js_err_not_found: 'Ce lien a expiré, a déjà été utilisé, ou la clé est incorrecte.',
     js_bind_synced: 'Il s\'agit d\'une passkey synchronisée. Elle existe sur tous les appareils liés à votre compte et ne peut donc pas lier ce secret à un seul appareil. Utilisez une clé de sécurité matérielle ou un authentificateur lié à l\'appareil. Actualisez la page avant de réessayer avec un autre authentificateur.',
+    reveal_hold: 'MAINTENIR POUR AFFICHER',
+    reveal_visible: 'VISIBLE',
+    reveal_a11y_hint: 'Maintenez ce bouton, ou la touche Espace ou Entrée, pour afficher le contenu. Il est masqué de nouveau dès que vous relâchez. La copie dans le presse-papiers fonctionne sans rien afficher.',
+    sent_title: 'Secrets envoyés',
+    sent_loading: 'Chargement...',
+    sent_empty: 'Vous n’avez encore envoyé aucun secret.',
+    sent_error: 'Impossible de charger la liste.',
+    sent_col_created: 'Créé',
+    sent_status_pending: 'Non ouvert',
+    sent_status_opened: 'Ouvert',
+    sent_status_expired: 'Expiré sans être ouvert',
+    sent_status_revoked: 'Révoqué',
+    sent_status_forgotten: 'Détruit par le destinataire',
+    sent_status_burned: 'Détruit après de mauvaises clés',
+    sent_opens: 'ouvertures',
+    sent_failed: 'tentatives échouées',
+    sent_revoke: 'Révoquer',
+    sent_revoke_confirm: 'Cliquez à nouveau pour confirmer',
+    sent_propagation: 'La révocation détruit le secret immédiatement. Sa propagation à tous les points de présence Cloudflare peut prendre jusqu’à une minute.',
+    forget_btn: 'Détruire maintenant',
+    forget_confirm: 'Cliquez à nouveau pour détruire définitivement',
+    forget_done: 'Le secret a été détruit. Ce lien ne fonctionne plus, ni pour vous ni pour quiconque.',
+    forget_error: 'Impossible de détruire le secret. Actualisez la page et réessayez.',
+    gen_mode_label: 'Standard de mot de passe',
+    gen_mode_nist: 'NIST SP 800-63B (20 caractères)',
+    gen_mode_eff: 'Mémorisable, liste EFF (6 mots)',
+    gen_mode_bip39: 'Mémorisable, liste BIP-39 (12 mots)',
+    gen_mode_legacy: 'Entreprise historique (12 caractères)',
+    gen_mode_key256: 'Clé API, 256 bits (Base64)',
+    gen_mode_key512: 'Clé API, 512 bits (Base64)',
+    gen_entropy: 'Environ {n} bits d’entropie.',
+    gen_wordlist_failed: 'La liste de mots n’a pas pu être chargée, aucun mot de passe n’a donc été généré. Vérifiez votre connexion et réessayez, ou choisissez un autre standard.',
+    sent_status_label: 'Statut',
+    sent_signed_in: 'Connecté en tant que',
+    sent_hint: 'Secrets créés depuis ce compte. Une révocation détruit le secret immédiatement, pour tout le monde.',
+    forget_note: 'Terminé ? Mettez fin à l’accès maintenant au lieu d’attendre l’expiration.',
+    js_err_id_taken: 'Cet identifiant appartient déjà à un autre compte. Rien n’a été enregistré. Réessayez pour en obtenir un nouveau.',
   },
 
   // ────────────────────────── Español ──────────────────────────
@@ -929,6 +1119,7 @@ export const I18N: Record<LangCode, Translations> = {
 
     qr_title: 'CÓDIGO QR',
     qr_close: 'CERRAR',
+    qr_failed: 'No se pudo generar el código QR. Actualiza la página e inténtalo de nuevo, o copia el enlace.',
 
     js_copied: '¡Copiado!',
     js_manual: 'Copiar manualmente: ',
@@ -1023,6 +1214,43 @@ export const I18N: Record<LangCode, Translations> = {
     js_err_terminated: 'Demasiados intentos fallidos. El secreto se ha destruido de forma permanente. Pide al remitente un enlace nuevo.',
     js_err_not_found: 'Este enlace ha caducado, ya se ha usado, o la clave es incorrecta.',
     js_bind_synced: 'Es una passkey sincronizada. Existe en todos los dispositivos vinculados a tu cuenta, así que no puede vincular este secreto a un solo dispositivo. Usa una llave de seguridad física o un autenticador vinculado al dispositivo. Actualiza la página antes de volver a intentarlo con otro autenticador.',
+    reveal_hold: 'MANTÉN PULSADO PARA VER',
+    reveal_visible: 'VISIBLE',
+    reveal_a11y_hint: 'Mantén pulsado este botón, o la tecla Espacio o Intro, para mostrar el contenido. Se oculta de nuevo en cuanto sueltas. Copiar al portapapeles funciona sin mostrar nada.',
+    sent_title: 'Secretos enviados',
+    sent_loading: 'Cargando...',
+    sent_empty: 'Todavía no has enviado ningún secreto.',
+    sent_error: 'No se pudo cargar la lista.',
+    sent_col_created: 'Creado',
+    sent_status_pending: 'Sin abrir',
+    sent_status_opened: 'Abierto',
+    sent_status_expired: 'Caducó sin abrirse',
+    sent_status_revoked: 'Revocado',
+    sent_status_forgotten: 'Destruido por el destinatario',
+    sent_status_burned: 'Destruido tras claves incorrectas',
+    sent_opens: 'aperturas',
+    sent_failed: 'intentos fallidos',
+    sent_revoke: 'Revocar',
+    sent_revoke_confirm: 'Haz clic de nuevo para confirmar',
+    sent_propagation: 'Revocar destruye el secreto de inmediato. Puede tardar hasta un minuto en llegar a todas las ubicaciones de Cloudflare.',
+    forget_btn: 'Destruir ahora',
+    forget_confirm: 'Haz clic de nuevo para destruirlo definitivamente',
+    forget_done: 'El secreto ha sido destruido. Este enlace ya no funciona, ni para ti ni para nadie.',
+    forget_error: 'No se pudo destruir el secreto. Actualiza la página e inténtalo de nuevo.',
+    gen_mode_label: 'Estándar de contraseña',
+    gen_mode_nist: 'NIST SP 800-63B (20 caracteres)',
+    gen_mode_eff: 'Memorizable, lista EFF (6 palabras)',
+    gen_mode_bip39: 'Memorizable, lista BIP-39 (12 palabras)',
+    gen_mode_legacy: 'Corporativo heredado (12 caracteres)',
+    gen_mode_key256: 'Clave API, 256 bits (Base64)',
+    gen_mode_key512: 'Clave API, 512 bits (Base64)',
+    gen_entropy: 'Unos {n} bits de entropía.',
+    gen_wordlist_failed: 'No se pudo cargar la lista de palabras, así que no se generó ninguna contraseña. Comprueba la conexión e inténtalo de nuevo, o elige otro estándar.',
+    sent_status_label: 'Estado',
+    sent_signed_in: 'Sesión iniciada como',
+    sent_hint: 'Secretos creados desde esta cuenta. Revocar uno lo destruye de inmediato, para todos.',
+    forget_note: '¿Has terminado? Finaliza el acceso ahora en lugar de esperar a que caduque.',
+    js_err_id_taken: 'Ese identificador ya pertenece a otra cuenta. No se guardó nada. Inténtalo de nuevo para obtener uno nuevo.',
   },
 
   // ────────────────────────── Українська ──────────────────────────
@@ -1096,6 +1324,7 @@ export const I18N: Record<LangCode, Translations> = {
 
     qr_title: 'QR-КОД',
     qr_close: 'ЗАКРИТИ',
+    qr_failed: 'Не вдалося створити QR-код. Оновіть сторінку та спробуйте ще раз або скопіюйте посилання.',
 
     js_copied: 'Скопійовано!',
     js_manual: 'Скопіюйте вручну: ',
@@ -1190,6 +1419,43 @@ export const I18N: Record<LangCode, Translations> = {
     js_err_terminated: 'Забагато невдалих спроб. Секрет знищено назавжди. Попросіть у відправника нове посилання.',
     js_err_not_found: 'Це посилання спливло, вже було використане, або ключ неправильний.',
     js_bind_synced: 'Це синхронізований passkey. Він існує на кожному пристрої, привʼязаному до вашого облікового запису, тож не може привʼязати цей секрет до одного пристрою. Скористайтеся апаратним ключем безпеки або привʼязаним до пристрою автентифікатором. Оновіть сторінку, перш ніж пробувати ще раз з іншим автентифікатором.',
+    reveal_hold: 'УТРИМУЙТЕ, ЩОБ ПОКАЗАТИ',
+    reveal_visible: 'ВИДИМО',
+    reveal_a11y_hint: 'Утримуйте цю кнопку або клавішу Пробіл чи Enter, щоб показати вміст. Він знову приховається, щойно ви відпустите. Копіювання до буфера обміну працює без показу вмісту.',
+    sent_title: 'Надіслані секрети',
+    sent_loading: 'Завантаження...',
+    sent_empty: 'Ви ще не надсилали жодного секрету.',
+    sent_error: 'Не вдалося завантажити список.',
+    sent_col_created: 'Створено',
+    sent_status_pending: 'Не відкрито',
+    sent_status_opened: 'Відкрито',
+    sent_status_expired: 'Час вичерпано, не відкрито',
+    sent_status_revoked: 'Відкликано',
+    sent_status_forgotten: 'Знищено отримувачем',
+    sent_status_burned: 'Знищено після хибних ключів',
+    sent_opens: 'відкриттів',
+    sent_failed: 'невдалих спроб',
+    sent_revoke: 'Відкликати',
+    sent_revoke_confirm: 'Натисніть ще раз для підтвердження',
+    sent_propagation: 'Відкликання знищує секрет негайно. Поширення на всі вузли Cloudflare може тривати до хвилини.',
+    forget_btn: 'Знищити зараз',
+    forget_confirm: 'Натисніть ще раз, щоб знищити назавжди',
+    forget_done: 'Секрет знищено. Це посилання більше не працює ані для вас, ані для будь-кого іншого.',
+    forget_error: 'Не вдалося знищити секрет. Оновіть сторінку та спробуйте ще раз.',
+    gen_mode_label: 'Стандарт пароля',
+    gen_mode_nist: 'NIST SP 800-63B (20 символів)',
+    gen_mode_eff: 'Легкий для запам’ятовування, список EFF (6 слів)',
+    gen_mode_bip39: 'Легкий для запам’ятовування, список BIP-39 (12 слів)',
+    gen_mode_legacy: 'Застарілий корпоративний (12 символів)',
+    gen_mode_key256: 'Ключ API, 256 біт (Base64)',
+    gen_mode_key512: 'Ключ API, 512 біт (Base64)',
+    gen_entropy: 'Приблизно {n} біт ентропії.',
+    gen_wordlist_failed: 'Не вдалося завантажити список слів, тому пароль не створено. Перевірте з’єднання та спробуйте ще раз або оберіть інший стандарт.',
+    sent_status_label: 'Статус',
+    sent_signed_in: 'Ви увійшли як',
+    sent_hint: 'Секрети, створені з цього облікового запису. Відкликання знищує секрет негайно, для всіх.',
+    forget_note: 'Готово? Завершіть доступ зараз, замість того щоб чекати завершення терміну.',
+    js_err_id_taken: 'Цей ідентифікатор уже належить іншому обліковому запису. Нічого не збережено. Спробуйте ще раз, щоб отримати новий.',
   },
 
   // ────────────────────────── Português ──────────────────────────
@@ -1263,6 +1529,7 @@ export const I18N: Record<LangCode, Translations> = {
 
     qr_title: 'CÓDIGO QR',
     qr_close: 'FECHAR',
+    qr_failed: 'Não foi possível gerar o código QR. Atualize a página e tente novamente, ou copie a ligação.',
 
     js_copied: 'Copiado!',
     js_manual: 'Copiar manualmente: ',
@@ -1357,6 +1624,43 @@ export const I18N: Record<LangCode, Translations> = {
     js_err_terminated: 'Tentativas malsucedidas demais. O segredo foi destruído permanentemente. Peça um novo link ao remetente.',
     js_err_not_found: 'Este link expirou, já foi usado, ou a chave está incorreta.',
     js_bind_synced: 'Essa é uma passkey sincronizada. Ela existe em todos os dispositivos vinculados à sua conta, portanto não pode vincular este segredo a um único dispositivo. Use uma chave de segurança física ou um autenticador vinculado ao dispositivo. Atualize a página antes de tentar novamente com outro autenticador.',
+    reveal_hold: 'MANTENHA PRESSIONADO PARA VER',
+    reveal_visible: 'VISÍVEL',
+    reveal_a11y_hint: 'Mantenha este botão pressionado, ou a tecla Espaço ou Enter, para revelar o conteúdo. Ele volta a ficar oculto assim que você soltar. Copiar para a área de transferência funciona sem revelar nada.',
+    sent_title: 'Segredos enviados',
+    sent_loading: 'A carregar...',
+    sent_empty: 'Ainda não enviou nenhum segredo.',
+    sent_error: 'Não foi possível carregar a lista.',
+    sent_col_created: 'Criado',
+    sent_status_pending: 'Por abrir',
+    sent_status_opened: 'Aberto',
+    sent_status_expired: 'Expirou por abrir',
+    sent_status_revoked: 'Revogado',
+    sent_status_forgotten: 'Destruído pelo destinatário',
+    sent_status_burned: 'Destruído após chaves erradas',
+    sent_opens: 'aberturas',
+    sent_failed: 'tentativas falhadas',
+    sent_revoke: 'Revogar',
+    sent_revoke_confirm: 'Clique novamente para confirmar',
+    sent_propagation: 'A revogação destrói o segredo de imediato. Pode demorar até um minuto a chegar a todas as localizações da Cloudflare.',
+    forget_btn: 'Destruir agora',
+    forget_confirm: 'Clique novamente para destruir definitivamente',
+    forget_done: 'O segredo foi destruído. Esta ligação já não funciona, nem para si nem para ninguém.',
+    forget_error: 'Não foi possível destruir o segredo. Atualize a página e tente novamente.',
+    gen_mode_label: 'Padrão de palavra-passe',
+    gen_mode_nist: 'NIST SP 800-63B (20 caracteres)',
+    gen_mode_eff: 'Memorizável, lista EFF (6 palavras)',
+    gen_mode_bip39: 'Memorizável, lista BIP-39 (12 palavras)',
+    gen_mode_legacy: 'Empresarial antigo (12 caracteres)',
+    gen_mode_key256: 'Chave API, 256 bits (Base64)',
+    gen_mode_key512: 'Chave API, 512 bits (Base64)',
+    gen_entropy: 'Cerca de {n} bits de entropia.',
+    gen_wordlist_failed: 'Não foi possível carregar a lista de palavras, por isso não foi gerada nenhuma palavra-passe. Verifique a ligação e tente novamente, ou escolha outro padrão.',
+    sent_status_label: 'Estado',
+    sent_signed_in: 'Sessão iniciada como',
+    sent_hint: 'Segredos criados a partir desta conta. Revogar um destrói-o de imediato, para todos.',
+    forget_note: 'Já terminou? Termine o acesso agora em vez de esperar que expire.',
+    js_err_id_taken: 'Esse identificador já pertence a outra conta. Nada foi guardado. Tente novamente para obter um novo.',
   },
 
   // ────────────────────────── 中文 (简体) ──────────────────────────
@@ -1430,6 +1734,7 @@ export const I18N: Record<LangCode, Translations> = {
 
     qr_title: '\u4E8C\u7EF4\u7801',
     qr_close: '\u5173\u95ED',
+    qr_failed: '无法生成二维码。请刷新页面后重试，或改为复制链接。',
 
     js_copied: '\u5DF2\u590D\u5236\uFF01',
     js_manual: '\u624B\u52A8\u590D\u5236\uFF1A',
@@ -1524,6 +1829,43 @@ export const I18N: Record<LangCode, Translations> = {
     js_err_terminated: '失败次数过多，密文已被永久销毁。请向发送方索取新链接。',
     js_err_not_found: '此链接已过期、已被使用，或密钥错误。',
     js_bind_synced: '这是同步的通行密钥，它存在于与您账户关联的每台设备上，因此无法把此密文绑定到单一设备。请使用硬件安全密钥，或与设备绑定的验证器。 请先刷新页面，再用其他验证器重试。',
+    reveal_hold: '按住以显示',
+    reveal_visible: '已显示',
+    reveal_a11y_hint: '按住此按钮，或按住空格键或回车键，即可显示内容。松开后立即重新隐藏。复制到剪贴板无需显示内容。',
+    sent_title: '已发送的密文',
+    sent_loading: '加载中...',
+    sent_empty: '您还没有发送过任何密文。',
+    sent_error: '无法加载列表。',
+    sent_col_created: '创建时间',
+    sent_status_pending: '未打开',
+    sent_status_opened: '已打开',
+    sent_status_expired: '未打开即过期',
+    sent_status_revoked: '已撤销',
+    sent_status_forgotten: '已由接收方销毁',
+    sent_status_burned: '因密钥错误而销毁',
+    sent_opens: '打开次数',
+    sent_failed: '失败尝试',
+    sent_revoke: '撤销',
+    sent_revoke_confirm: '再次点击以确认',
+    sent_propagation: '撤销会立即销毁密文，同步到所有 Cloudflare 边缘节点最多需要一分钟。',
+    forget_btn: '立即销毁',
+    forget_confirm: '再次点击以永久销毁',
+    forget_done: '密文已销毁。此链接对您和任何人都不再有效。',
+    forget_error: '无法销毁密文。请刷新页面后重试。',
+    gen_mode_label: '密码标准',
+    gen_mode_nist: 'NIST SP 800-63B（20 个字符）',
+    gen_mode_eff: '易记短语，EFF 词表（6 个单词）',
+    gen_mode_bip39: '易记短语，BIP-39 词表（12 个单词）',
+    gen_mode_legacy: '传统企业规则（12 个字符）',
+    gen_mode_key256: 'API 密钥，256 位（Base64）',
+    gen_mode_key512: 'API 密钥，512 位（Base64）',
+    gen_entropy: '约 {n} 位熵。',
+    gen_wordlist_failed: '词表加载失败，因此未生成密码。请检查网络后重试，或改选其他标准。',
+    sent_status_label: '状态',
+    sent_signed_in: '当前登录',
+    sent_hint: '由此账户创建的密文。撤销会立即销毁密文，对所有人生效。',
+    forget_note: '看完了？现在就结束访问，无需等待过期。',
+    js_err_id_taken: '该标识符已属于其他账户，未保存任何内容。请重试以获取新的标识符。',
   },
 
   // ────────────────────────── Čeština ──────────────────────────
@@ -1597,6 +1939,7 @@ export const I18N: Record<LangCode, Translations> = {
 
     qr_title: 'QR KÓD',
     qr_close: 'ZAVŘÍT',
+    qr_failed: 'QR kód se nepodařilo vygenerovat. Obnovte stránku a zkuste to znovu, nebo odkaz zkopírujte.',
 
     js_copied: 'Zkopírováno!',
     js_manual: 'Zkopírujte ručně: ',
@@ -1691,6 +2034,43 @@ export const I18N: Record<LangCode, Translations> = {
     js_err_terminated: 'Příliš mnoho neúspěšných pokusů. Tajemství bylo trvale zničeno. Požádejte odesílatele o nový odkaz.',
     js_err_not_found: 'Tento odkaz vypršel, byl už použit, nebo je klíč nesprávný.',
     js_bind_synced: 'Toto je synchronizovaný passkey. Existuje na každém zařízení propojeném s vaším účtem, takže nemůže svázat toto tajemství s jedním zařízením. Použijte hardwarový bezpečnostní klíč nebo autentikátor svázaný se zařízením. Než to zkusíte znovu s jiným autentikátorem, obnovte stránku.',
+    reveal_hold: 'PODRŽTE PRO ZOBRAZENÍ',
+    reveal_visible: 'VIDITELNÉ',
+    reveal_a11y_hint: 'Podržte toto tlačítko nebo klávesu Mezerník či Enter, aby se obsah zobrazil. Jakmile pustíte, znovu se skryje. Kopírování do schránky funguje bez zobrazení obsahu.',
+    sent_title: 'Odeslaná tajemství',
+    sent_loading: 'Načítání...',
+    sent_empty: 'Zatím jste neodeslali žádné tajemství.',
+    sent_error: 'Seznam se nepodařilo načíst.',
+    sent_col_created: 'Vytvořeno',
+    sent_status_pending: 'Neotevřeno',
+    sent_status_opened: 'Otevřeno',
+    sent_status_expired: 'Vypršelo neotevřené',
+    sent_status_revoked: 'Odvoláno',
+    sent_status_forgotten: 'Zničeno příjemcem',
+    sent_status_burned: 'Zničeno po chybných klíčích',
+    sent_opens: 'otevření',
+    sent_failed: 'neúspěšné pokusy',
+    sent_revoke: 'Odvolat',
+    sent_revoke_confirm: 'Potvrďte dalším kliknutím',
+    sent_propagation: 'Odvolání zničí tajemství okamžitě. Rozšíření na všechny uzly Cloudflare může trvat až minutu.',
+    forget_btn: 'Zničit nyní',
+    forget_confirm: 'Dalším kliknutím zničíte natrvalo',
+    forget_done: 'Tajemství bylo zničeno. Tento odkaz už nefunguje ani vám, ani nikomu jinému.',
+    forget_error: 'Tajemství se nepodařilo zničit. Obnovte stránku a zkuste to znovu.',
+    gen_mode_label: 'Standard hesla',
+    gen_mode_nist: 'NIST SP 800-63B (20 znaků)',
+    gen_mode_eff: 'Zapamatovatelné, seznam EFF (6 slov)',
+    gen_mode_bip39: 'Zapamatovatelné, seznam BIP-39 (12 slov)',
+    gen_mode_legacy: 'Starší firemní (12 znaků)',
+    gen_mode_key256: 'Klíč API, 256 bitů (Base64)',
+    gen_mode_key512: 'Klíč API, 512 bitů (Base64)',
+    gen_entropy: 'Přibližně {n} bitů entropie.',
+    gen_wordlist_failed: 'Seznam slov se nepodařilo načíst, heslo proto nebylo vygenerováno. Zkontrolujte připojení a zkuste to znovu, nebo zvolte jiný standard.',
+    sent_status_label: 'Stav',
+    sent_signed_in: 'Přihlášen jako',
+    sent_hint: 'Tajemství vytvořená z tohoto účtu. Odvolání tajemství okamžitě zničí, pro všechny.',
+    forget_note: 'Hotovo? Ukončete přístup hned, místo čekání na vypršení.',
+    js_err_id_taken: 'Tento identifikátor už patří jinému účtu. Nic nebylo uloženo. Zkuste to znovu pro nový identifikátor.',
   },
 }
 

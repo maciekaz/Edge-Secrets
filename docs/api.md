@@ -11,7 +11,7 @@ Cloudflare Access requires only **two rules** to protect the entire application:
 - `/gen` - the creation panel
 - `/api/v1/admin/*` - all write/admin API operations
 
-> Public UI routes (`/receive/:id`, `/share/:id`, `/s/:id`, `/ui/config`, `/ui/logo`, `/ui/qr`) and public API routes (`/api/v1/public/*`) must remain outside the Access policy.
+> Public UI routes (`/receive/:id`, `/share/:id`, `/s/:id`, `/ui/config`, `/ui/logo`) and public API routes (`/api/v1/public/*`) must remain outside the Access policy.
 
 ---
 
@@ -44,6 +44,53 @@ Store an encrypted secret in KV.
 ```json
 { "success": true }
 ```
+
+- `bindMode` (`"device"` | `"webauthn"`) and `allowFallback` opt the secret into device binding. Any other value falls back to no binding.
+- The secret is recorded in the sender's ledger, keyed to the Cloudflare Access identity on the request.
+
+**Response `409`** — the identifier already belongs to a different sender. Neither the ciphertext nor the right to revoke changes hands:
+```json
+{ "error": "ID_TAKEN" }
+```
+
+#### `GET /api/v1/admin/secrets`
+List the secrets created by the signed-in sender, newest first, capped at 100. Scoped by owner inside the query, so no parameter combination returns another sender's rows.
+
+**Response `200`:**
+```json
+{
+  "secrets": [
+    {
+      "secret_id": "string",
+      "created_at": 1765238400,
+      "expires_at": 1765324800,
+      "bind_mode": "device",
+      "status": "opened",
+      "first_opened_at": 1765238500,
+      "last_opened_at": 1765238900,
+      "open_count": 2,
+      "failed_attempts": 0,
+      "revoked_at": null
+    }
+  ]
+}
+```
+
+`status` is one of `pending`, `opened`, `expired`, `revoked`, `forgotten`, `burned`. `expired` is derived from the clock at read time and never stored. Callers authenticated by a service token get an empty list, since a service token carries no user subject to attribute secrets to.
+
+The ledger holds no secret material: no verifier, ciphertext, passphrase or URL fragment, and no recipient IP or user agent. An identifier is enough to build a link and nothing more, because the passphrase never leaves the fragment.
+
+#### `DELETE /api/v1/admin/secrets/:id`
+Revoke a secret the caller created. Destroys the KV record, the binding row and any outstanding challenges. Idempotent.
+
+Revocation takes effect immediately, but KV is eventually consistent — reaching every edge location can take up to about a minute.
+
+**Response `200`:**
+```json
+{ "ok": true }
+```
+
+**Response `404`** — no such secret, or it belongs to a different sender. Deliberately the same answer for both, so the ledger cannot be probed for which identifiers exist.
 
 #### Programmatic usage (Node.js / browser)
 
@@ -410,10 +457,36 @@ Retrieve and burn an encrypted secret. Verifier is checked before returning ciph
 { "error": "TERMINATED" }
 ```
 
-**Response `404`** — secret not found or expired:
+**Response `404`** — secret not found or expired. A code rather than a sentence, so the client renders it in the page language:
 ```json
-{ "error": "Link wygasł, lub klucz jest nieprawidłowy" }
+{ "error": "NOT_FOUND" }
 ```
+
+---
+
+#### `POST /api/v1/public/secrets/:id/forget`
+Destroy a device-bound secret early, at the recipient's request. Applies only to secrets created with a binding mode; a one-time secret is already gone by the time this could be called.
+
+The right to destroy is the right to read, so the request clears the same gate a read does: the `__Host-` binding cookie plus a signature over a single-use challenge. Knowing an identifier is never enough. No Turnstile is required here, because the binding proof strictly dominates a bot challenge and the client's single-use token was already spent on the read.
+
+**Request body (JSON):** identical in shape to `retrieve` — `verifierCandidate`, then `bindNonce` with `bindSignature` or `bindAssertion` on the second leg.
+
+**Response `401`** — prove possession first (same handshake as retrieve):
+```json
+{ "error": "BIND_CHALLENGE", "challenge": "...", "factor": "ecdsa", "credId": "..." }
+```
+
+**Response `200`** — destroyed. The binding cookie is cleared in the same response.
+```json
+{ "ok": true }
+```
+
+**Response `400`** — the secret has no binding, so there is nothing to destroy early:
+```json
+{ "error": "FORGET_NOT_APPLICABLE" }
+```
+
+**Response `403`** — caller is not the bound client, or the verifier was wrong. A wrong verifier charges the same attempt counter as a read, so this is not an unmetered oracle.
 
 ---
 
@@ -484,8 +557,10 @@ These routes are HTML pages or static assets and must remain outside CF Access:
 | `GET` | `/s/:id` | Short-link redirect |
 | `GET` | `/ui/config` | Global UI settings — accent, bg, brand, tagline, all three Turnstile flags (`turnstileCreds` / `turnstileFiles` / `turnstileFilesE2ee`), current storage caps (`maxStorageGb`, `maxUploadGb`, `freeTierGb`), and the fixed E2EE cap (`e2eeMaxUploadMb`) |
 | `GET` | `/ui/logo` | Brand logo from R2 |
-| `GET` | `/ui/qr` | Server-rendered SVG QR code (`?d=encodedUrl`) |
 | `GET` | `/ui/argon2.v1.js` | Bundled hash-wasm Argon2id module. `immutable` cached; same-origin delivery so no external CDN enters the CSP. Bump the version suffix (`v1` → `v2`) when swapping implementations |
+| `GET` | `/ui/qrcode.v1.js` | QR encoder, served to the browser and loaded on first use of a QR button. Codes are drawn client-side, so a link is never handed to the Worker in order to be rendered; `immutable` cached |
+| `GET` | `/ui/words-eff.v1.txt` | EFF Long Wordlist, 7776 words, one per line. Fetched only when the sender selects that passphrase standard; `immutable` cached. Public, non-secret data |
+| `GET` | `/ui/words-bip39.v1.txt` | BIP-39 English wordlist, 2048 words, shipped unmodified. Same on-demand, `immutable` delivery |
 | `GET` | `/ui/app.v1.js` | Main client application bundle — **the only executable script on any page**. Contains the JSON-island reader, crypto helpers (`derive`, upload / decrypt pipelines), all form handlers, and the global event delegator that dispatches `data-click` / `data-change` / `data-input` / `data-submit` attributes to named actions. Served with `Cache-Control: public, max-age=60` so deploys propagate within a minute. Bump the version suffix if a breaking change requires immediate cache invalidation |
 
 ---

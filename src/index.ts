@@ -1,10 +1,21 @@
 import { Hono, type Context, type MiddlewareHandler } from 'hono'
 import { cors } from 'hono/cors'
 import { getCookie, setCookie } from 'hono/cookie'
-import qrcode from 'qrcode-generator'
+// Vendored from qrcode-generator@2.0.4 (MIT): the package `exports` map hides
+// dist/qrcode.js and the adjacent .d.ts is not a module. A test asserts this
+// copy stays byte-identical to the installed package.
+import QRCODE_JS from './qrcode-vendor.js'
 import { getLang, renderLangPicker, LANG_PICKER_CSS, LANG_PICKER_JS, type Translations, type LangCode } from './i18n'
 // Bundled via wrangler's Text rule — returns the minified UMD source as a string.
 import ARGON2_UMD_JS from 'hash-wasm/dist/argon2.umd.min.js'
+// EFF Long Wordlist, 7776 words. https://www.eff.org/files/2016/07/18/eff_large_wordlist.txt
+// sha256 as published: addd35536511597a02fa0a9ff1e5284677b8883b83e986e43f15a3db996b903e
+// Shipped as words only (`cut -f2`); the dice codes are dead weight here.
+// sha256 as shipped:   6d557f0693958fb5e650b68b5bee585eb82cf4da32965505c789e924743bc522
+import EFF_WORDLIST_TXT from './eff-wordlist.txt'
+// BIP-39 English, 2048 words, unmodified.
+// sha256: 2f5eed53a4727b4bf8880d8f3f199efc90e58503646d9ff8eff3a2ed3b24dbda
+import BIP39_WORDLIST_TXT from './bip39-wordlist.txt'
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -37,6 +48,9 @@ const CONFIG = {
   // Lifetime of one challenge. Nonces are single-use, so this only bounds how
   // long an unused one lingers.
   bindNonceTtl: 120,
+  // Ledger rows outlive their secret, so "expired, never opened" stays visible.
+  sentGrace: 604800,
+  sentPageSize: 100,
 } as const
 
 // Key-derivation algorithm label stored with each secret. Single-value union
@@ -103,6 +117,31 @@ interface SecretMetadata {
   // Present only on device-bound secrets. Its absence keeps every pre-existing
   // secret on the original burn-on-read path.
   bindMode?: BindMode
+}
+
+// `subject` is null when the token carries neither a user subject nor a service
+// token common name: authenticated, but unattributable.
+interface AccessIdentity {
+  subject: string | null
+  email: string | null
+}
+
+type AppEnv = { Bindings: Bindings; Variables: { access: AccessIdentity } }
+
+// 'expired' is never stored, only derived from the clock when the ledger is read.
+type SentStatus = 'pending' | 'opened' | 'revoked' | 'forgotten' | 'burned'
+
+interface SentSecretRecord {
+  secret_id: string
+  created_at: number
+  expires_at: number
+  bind_mode: string | null
+  status: SentStatus
+  first_opened_at: number | null
+  last_opened_at: number | null
+  open_count: number
+  failed_attempts: number
+  revoked_at: number | null
 }
 
 interface BindingRecord {
@@ -611,10 +650,15 @@ async function refreshKeys(teamDomain: string): Promise<void> {
   _keysFetchedAt = Date.now()
 }
 
-async function verifyAccessJWT(token: string, teamDomain: string, aud: string): Promise<boolean> {
+// Returns the asserted identity, or null when any check fails.
+async function verifyAccessJWT(
+  token: string,
+  teamDomain: string,
+  aud: string
+): Promise<AccessIdentity | null> {
   try {
     const parts = token.split('.')
-    if (parts.length !== 3) return false
+    if (parts.length !== 3) return null
     const [headerB64, payloadB64, sigB64] = parts as [string, string, string]
 
     const header = JSON.parse(new TextDecoder().decode(b64urlDecode(headerB64))) as { kid: string }
@@ -625,7 +669,7 @@ async function verifyAccessJWT(token: string, teamDomain: string, aud: string): 
     }
 
     const key = _keyCache.get(header.kid)
-    if (!key) return false
+    if (!key) return null
 
     const valid = await crypto.subtle.verify(
       'RSASSA-PKCS1-v1_5',
@@ -633,43 +677,111 @@ async function verifyAccessJWT(token: string, teamDomain: string, aud: string): 
       b64urlDecode(sigB64),
       new TextEncoder().encode(`${headerB64}.${payloadB64}`)
     )
-    if (!valid) return false
+    if (!valid) return null
 
     const payload = JSON.parse(new TextDecoder().decode(b64urlDecode(payloadB64))) as {
       aud: string | string[]
       exp: number
       iss: string
+      sub?: string
+      email?: string
+      common_name?: string
     }
 
     // Verify expiry
-    if (payload.exp < Math.floor(Date.now() / 1000)) return false
+    if (payload.exp < Math.floor(Date.now() / 1000)) return null
 
     // Verify audience matches this application
     const audiences = Array.isArray(payload.aud) ? payload.aud : [payload.aud]
-    if (!audiences.includes(aud)) return false
+    if (!audiences.includes(aud)) return null
 
-    return true
+    // Service tokens carry `common_name`; the prefix keeps the two namespaces
+    // from colliding on the derived owner hash.
+    const subject =
+      typeof payload.sub === 'string' && payload.sub
+        ? `user:${payload.sub}`
+        : typeof payload.common_name === 'string' && payload.common_name
+          ? `svc:${payload.common_name}`
+          : null
+
+    return { subject, email: typeof payload.email === 'string' ? payload.email : null }
   } catch {
-    return false
+    return null
   }
 }
 
-const requireAccess: MiddlewareHandler<{ Bindings: Bindings }> = async (c, next) => {
+// Keyed by PEPPER so a leaked ledger cannot be correlated with the Access user
+// directory, and derived from the subject so an e-mail change orphans nothing.
+async function ownerHash(env: Bindings, subject: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(env.PEPPER),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  )
+  const mac = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(`owner:${subject}`))
+  return b64urlEncode(new Uint8Array(mac))
+}
+
+// Null means the caller cannot be attributed; callers skip the ledger.
+async function requestOwner(c: Context<AppEnv>): Promise<string | null> {
+  const id = c.get('access')
+  if (!id?.subject) return null
+  return ownerHash(c.env, id.subject)
+}
+
+const requireAccess: MiddlewareHandler<AppEnv> = async (c, next) => {
   const token =
     c.req.header('Cf-Access-Jwt-Assertion') ??
     getCookie(c, 'CF_Authorization')
 
   if (!token) return c.text('Unauthorized', 401)
 
-  const valid = await verifyAccessJWT(token, c.env.CF_TEAM_DOMAIN, c.env.CF_AUD)
-  if (!valid) return c.text('Unauthorized', 401)
+  const identity = await verifyAccessJWT(token, c.env.CF_TEAM_DOMAIN, c.env.CF_AUD)
+  if (!identity) return c.text('Unauthorized', 401)
 
+  c.set('access', identity)
   return next()
+}
+
+// ── Sender Ledger ─────────────────────────────────────────────────────────────
+
+// Never on the critical path: a recipient with the right passphrase must get
+// their secret even if D1 is down. A lost row of history beats a lost secret.
+function noteSent(c: Context<AppEnv>, run: Promise<unknown>): void {
+  c.executionCtx.waitUntil(run.catch(() => {}))
+}
+
+// Revoked and forgotten are terminal: a late read must not walk them back to
+// 'opened'. Counters still move, so the attempt is still visible.
+function markOpened(env: Bindings, id: string): Promise<unknown> {
+  const now = Math.floor(Date.now() / 1000)
+  return env.DB.prepare(
+    "UPDATE sent_secrets SET status=CASE WHEN status IN ('revoked','forgotten') THEN status ELSE 'opened' END, open_count=open_count+1, first_opened_at=COALESCE(first_opened_at,?), last_opened_at=? WHERE secret_id=?"
+  )
+    .bind(now, now, id)
+    .run()
+}
+
+function markFailed(env: Bindings, id: string, destroyed: boolean): Promise<unknown> {
+  const sql = destroyed
+    ? "UPDATE sent_secrets SET failed_attempts=failed_attempts+1, status='burned' WHERE secret_id=?"
+    : 'UPDATE sent_secrets SET failed_attempts=failed_attempts+1 WHERE secret_id=?'
+  return env.DB.prepare(sql).bind(id).run()
+}
+
+// Dropping the binding row is what voids the recipient's cookie: retrieve then
+// fails closed on BIND_STATE_MISSING instead of treating the secret as unclaimed.
+async function destroySecret(env: Bindings, id: string): Promise<void> {
+  await env.SECRETS_STORE.delete(id)
+  await env.DB.prepare('DELETE FROM secret_bindings WHERE secret_id=?').bind(id).run()
+  await env.DB.prepare('DELETE FROM bind_nonces WHERE secret_id=?').bind(id).run()
 }
 
 // ── Hono App ──────────────────────────────────────────────────────────────────
 
-const app = new Hono<{ Bindings: Bindings }>()
+const app = new Hono<AppEnv>()
 
 // CORS middleware — scoped to /api/* only so HTML responses don't carry the
 // Access-Control-Allow-Origin header (it's meaningless for top-level HTML and
@@ -790,6 +902,31 @@ app.get('/ui/argon2.v1.js', () => {
 // as `${CLIENT_JS}`. Moved here so CSP can eventually drop `'unsafe-inline'`
 // from script-src. Short max-age: this file changes with every deploy, so
 // we let the browser revalidate quickly instead of immutable-caching it.
+// Fetched only when a sender picks that standard; picking one never pulls the
+// other, and a recipient on /receive/:id pulls neither.
+const wordlistResponse = (body: string) =>
+  new Response(body, {
+    headers: {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Cache-Control': 'public, max-age=31536000, immutable',
+      'X-Content-Type-Options': 'nosniff',
+    },
+  })
+
+app.get('/ui/words-eff.v1.txt', () => wordlistResponse(EFF_WORDLIST_TXT))
+app.get('/ui/words-bip39.v1.txt', () => wordlistResponse(BIP39_WORDLIST_TXT))
+
+// Loaded on first use of a QR button; most sessions never open one.
+app.get('/ui/qrcode.v1.js', () => {
+  return new Response(QRCODE_JS, {
+    headers: {
+      'Content-Type': 'application/javascript; charset=utf-8',
+      'Cache-Control': 'public, max-age=31536000, immutable',
+      'X-Content-Type-Options': 'nosniff',
+    },
+  })
+})
+
 app.get('/ui/app.v1.js', () => {
   return new Response(CLIENT_JS_BODY, {
     headers: {
@@ -801,39 +938,6 @@ app.get('/ui/app.v1.js', () => {
 })
 
 // QR code generator — public, server-side SVG rendering
-app.get('/ui/qr', (c) => {
-  const raw = c.req.query('d') ?? ''
-  if (!raw || raw.length > 2000) return c.text('', 400)
-
-  let data: string
-  try { data = decodeURIComponent(raw) } catch { return c.text('', 400) }
-
-  try {
-    const qr = qrcode(0, 'M')
-    qr.addData(data, 'Byte')
-    qr.make()
-    const n = qr.getModuleCount()
-    const pad = 4
-    const cells: string[] = []
-    for (let r = 0; r < n; r++)
-      for (let col = 0; col < n; col++)
-        if (qr.isDark(r, col))
-          cells.push(`<rect x="${col + pad}" y="${r + pad}" width="1" height="1"/>`)
-
-    const size = n + pad * 2
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" shape-rendering="crispEdges"><rect width="${size}" height="${size}" fill="white"/><g fill="black">${cells.join('')}</g></svg>`
-    return new Response(svg, {
-      headers: {
-        'Content-Type': 'image/svg+xml',
-        'Cache-Control': 'public, max-age=3600',
-        'X-Content-Type-Options': 'nosniff',
-      },
-    })
-  } catch {
-    return c.text('QR generation failed — data too long', 400)
-  }
-})
-
 // Global UI config — public read, protected write
 app.get('/ui/config', async (c) => {
   const [accent, bg, brand, tagline, tsSiteKey, tsCreds, tsFiles, tsFilesE2ee, limits] = await Promise.all([
@@ -861,6 +965,15 @@ app.get('/ui/config', async (c) => {
     freeTierGb:    CONFIG.freeTierBytes / GiB,
     e2eeMaxUploadMb: CONFIG.e2eeMaxUpload / (1024 * 1024),
   })
+})
+
+app.get('/ui/logo', async (c) => {
+  const obj = await c.env.BUCKET.get('ui-logo')
+  if (!obj) return c.text('', 404)
+  const headers = new Headers()
+  headers.set('Content-Type', obj.httpMetadata?.contentType ?? 'image/png')
+  headers.set('Cache-Control', 'public, max-age=3600')
+  return new Response(obj.body, { headers })
 })
 
 app.post('/api/v1/admin/ui/config', async (c) => {
@@ -940,6 +1053,26 @@ app.post('/api/v1/admin/ui/turnstile', async (c) => {
   return c.json({ ok: true })
 })
 
+app.post('/api/v1/admin/ui/logo', async (c) => {
+  const ct = c.req.header('Content-Type') ?? 'image/png'
+  const allowed = ['image/png', 'image/svg+xml', 'image/jpeg', 'image/webp']
+  if (!allowed.some((t) => ct.startsWith(t))) {
+    return c.json({ error: 'Invalid image type — use PNG, SVG, JPEG, or WebP' }, 400)
+  }
+  const buf = await c.req.arrayBuffer()
+  if (buf.byteLength > 262144) {
+    return c.json({ error: 'Logo max 256 KB' }, 400)
+  }
+  await c.env.BUCKET.put('ui-logo', buf, { httpMetadata: { contentType: ct } })
+  return c.json({ ok: true })
+})
+
+app.delete('/api/v1/admin/ui/logo', async (c) => {
+  await c.env.BUCKET.delete('ui-logo')
+  return c.json({ ok: true })
+})
+
+// Store encrypted secret in KV
 // URL shortener — create link (protected), redirect (public)
 app.post('/api/v1/admin/links', async (c) => {
   const body = await c.req.json<{ url?: string; ttl?: number; maxClicks?: number }>()
@@ -1012,35 +1145,6 @@ app.get('/s/:id', async (c) => {
 })
 
 // Logo — public read, protected upload/delete (stored in R2)
-app.get('/ui/logo', async (c) => {
-  const obj = await c.env.BUCKET.get('ui-logo')
-  if (!obj) return c.text('', 404)
-  const headers = new Headers()
-  headers.set('Content-Type', obj.httpMetadata?.contentType ?? 'image/png')
-  headers.set('Cache-Control', 'public, max-age=3600')
-  return new Response(obj.body, { headers })
-})
-
-app.post('/api/v1/admin/ui/logo', async (c) => {
-  const ct = c.req.header('Content-Type') ?? 'image/png'
-  const allowed = ['image/png', 'image/svg+xml', 'image/jpeg', 'image/webp']
-  if (!allowed.some((t) => ct.startsWith(t))) {
-    return c.json({ error: 'Invalid image type — use PNG, SVG, JPEG, or WebP' }, 400)
-  }
-  const buf = await c.req.arrayBuffer()
-  if (buf.byteLength > 262144) {
-    return c.json({ error: 'Logo max 256 KB' }, 400)
-  }
-  await c.env.BUCKET.put('ui-logo', buf, { httpMetadata: { contentType: ct } })
-  return c.json({ ok: true })
-})
-
-app.delete('/api/v1/admin/ui/logo', async (c) => {
-  await c.env.BUCKET.delete('ui-logo')
-  return c.json({ ok: true })
-})
-
-// Store encrypted secret in KV
 app.post('/api/v1/admin/secrets', async (c) => {
   const body = await c.req.json<StoreBody>()
   // Only trust algoVersion values we actually ship; fall back to the current
@@ -1077,11 +1181,92 @@ app.post('/api/v1/admin/secrets', async (c) => {
       .run()
   }
 
+  // Written before the KV put, like the binding row: a failed insert must not
+  // leave a secret its sender can never see or pull back.
+  //
+  // The conflict clause updates only when the row is already the caller's, so
+  // reusing another sender's identifier reports zero rows touched. Without it,
+  // posting a known id would hand over the ciphertext and the right to revoke.
+  const owner = await requestOwner(c)
+  if (owner) {
+    const claim = await c.env.DB.prepare(
+      "INSERT INTO sent_secrets (secret_id,owner_hash,created_at,expires_at,purge_at,bind_mode,status,first_opened_at,last_opened_at,open_count,failed_attempts,revoked_at) VALUES (?,?,?,?,?,?,'pending',NULL,NULL,0,0,NULL) ON CONFLICT(secret_id) DO UPDATE SET created_at=excluded.created_at, expires_at=excluded.expires_at, purge_at=excluded.purge_at, bind_mode=excluded.bind_mode, status='pending', first_opened_at=NULL, last_opened_at=NULL, open_count=0, failed_attempts=0, revoked_at=NULL WHERE sent_secrets.owner_hash=excluded.owner_hash"
+    )
+      .bind(
+        body.id,
+        owner,
+        Math.floor(Date.now() / 1000),
+        expiresAt,
+        expiresAt + CONFIG.sentGrace,
+        bindMode ?? null
+      )
+      .run()
+
+    if ((claim.meta?.changes ?? 0) !== 1) {
+      return c.json({ error: 'ID_TAKEN' }, 409)
+    }
+  }
+
   await c.env.SECRETS_STORE.put(body.id, body.encryptedData, {
     expirationTtl: ttlSec,
     metadata: meta,
   })
   return c.json({ success: true })
+})
+
+// Scoped by owner_hash inside the WHERE clause, not filtered afterwards, so no
+// parameter combination returns another sender's rows. Files stay shared.
+app.get('/api/v1/admin/secrets', async (c) => {
+  // Read from the token every request rather than stored, so an address change
+  // needs no migration.
+  const email = c.get('access')?.email ?? null
+  const owner = await requestOwner(c)
+  if (!owner) return c.json({ email, secrets: [] })
+
+  const rows = await c.env.DB.prepare(
+    'SELECT secret_id,created_at,expires_at,bind_mode,status,first_opened_at,last_opened_at,open_count,failed_attempts,revoked_at FROM sent_secrets WHERE owner_hash=? ORDER BY created_at DESC LIMIT ?'
+  )
+    .bind(owner, CONFIG.sentPageSize)
+    .all<SentSecretRecord>()
+
+  const now = Math.floor(Date.now() / 1000)
+  return c.json({
+    email,
+    secrets: rows.results.map((r) => ({
+      ...r,
+      // Lapsing is a fact about the clock, not a state transition, so it is
+      // derived here instead of requiring a row rewrite the moment it happens.
+      status: r.status === 'pending' && r.expires_at <= now ? 'expired' : r.status,
+    })),
+  })
+})
+
+// Emergency revocation by the sender. Idempotent: a second call on an already
+// revoked secret still reports success, since the desired end state holds.
+app.delete('/api/v1/admin/secrets/:id', async (c) => {
+  const owner = await requestOwner(c)
+  if (!owner) return c.json({ error: 'NO_OWNER' }, 403)
+  const id = c.req.param('id')
+
+  const row = await c.env.DB.prepare(
+    'SELECT secret_id FROM sent_secrets WHERE secret_id=? AND owner_hash=?'
+  )
+    .bind(id, owner)
+    .first<{ secret_id: string }>()
+
+  // 404 rather than 403 on someone else's secret. A distinct code would let any
+  // authenticated user probe which identifiers exist in the ledger.
+  if (!row) return c.json({ error: 'NOT_FOUND' }, 404)
+
+  await destroySecret(c.env, id)
+  const now = Math.floor(Date.now() / 1000)
+  await c.env.DB.prepare(
+    "UPDATE sent_secrets SET status='revoked', revoked_at=COALESCE(revoked_at,?) WHERE secret_id=? AND owner_hash=?"
+  )
+    .bind(now, id, owner)
+    .run()
+
+  return c.json({ ok: true })
 })
 
 // Runs before the verifier is compared. The ordering is load-bearing: a client
@@ -1094,7 +1279,7 @@ app.post('/api/v1/admin/secrets', async (c) => {
 // request qualified: 'unclaimed' (nobody has bound the secret yet, so the
 // passphrase alone may claim it) or 'proven' (the pinned factor was verified).
 async function handleBoundRetrieve(
-  c: Context<{ Bindings: Bindings }>,
+  c: Context<AppEnv>,
   id: string,
   metadata: SecretMetadata,
   body: RetrieveBody
@@ -1177,7 +1362,7 @@ async function handleBoundRetrieve(
 // Runs only after the verifier matched. Claims the secret for the first reader,
 // or counts a re-read by the already-proven bound client.
 async function finalizeBoundRetrieve(
-  c: Context<{ Bindings: Bindings }>,
+  c: Context<AppEnv>,
   id: string,
   value: string,
   metadata: SecretMetadata,
@@ -1197,9 +1382,10 @@ async function finalizeBoundRetrieve(
     await c.env.DB.prepare('UPDATE secret_bindings SET read_count=read_count+1 WHERE secret_id=?')
       .bind(id)
       .run()
+    noteSent(c, markOpened(c.env, id))
     // The reader needs to know how long this stays retrievable, since unlike a
     // one-time secret it survives the tab being closed.
-    return c.json({ encryptedData: value, expiresAt: metadata.expiresAt })
+    return c.json({ encryptedData: value, expiresAt: metadata.expiresAt, bound: row.bound_factor })
   }
 
   // ── First read: claim the secret ──
@@ -1288,6 +1474,7 @@ async function finalizeBoundRetrieve(
     maxAge: Math.max(60, (metadata.expiresAt ?? now + CONFIG.defaultTtl) - now),
   })
 
+  noteSent(c, markOpened(c.env, id))
   return c.json({ encryptedData: value, bound: factor, expiresAt: metadata.expiresAt })
 }
 
@@ -1302,6 +1489,53 @@ interface RetrieveBody {
   bindSignature?: string
   bindAuthData?: string
   bindAssertion?: WebauthnAssertion
+}
+
+// Shared by retrieve and forget. Both must charge a wrong passphrase to the
+// same counter, otherwise forget would be an unmetered oracle for guessing at a
+// secret that retrieve only allows three shots at.
+async function rejectBadVerifier(
+  c: Context<AppEnv>,
+  id: string,
+  value: string,
+  metadata: SecretMetadata
+): Promise<Response> {
+  const attempts = (metadata.attempts ?? 0) + 1
+  if (attempts >= CONFIG.maxAttempts) {
+    await c.env.SECRETS_STORE.delete(id)
+    noteSent(c, markFailed(c.env, id, true))
+    return c.json({ error: 'TERMINATED' }, 410)
+  }
+  // Preserve the secret's original expiration when bumping the attempt
+  // counter — previously we blindly reset to CONFIG.defaultTtl on every
+  // failed attempt, so an attacker could keep a short-TTL secret alive
+  // indefinitely by stopping at attempt 2 and resetting the clock.
+  let putOpts: KVNamespacePutOptions
+  if (metadata.expiresAt) {
+    const remaining = metadata.expiresAt - Math.floor(Date.now() / 1000)
+    // KV requires expirationTtl ≥ 60 s; if less remains, burn the secret
+    // instead of stretching the window.
+    if (remaining < 60) {
+      await c.env.SECRETS_STORE.delete(id)
+      noteSent(c, markFailed(c.env, id, true))
+      return c.json({ error: 'TERMINATED' }, 410)
+    }
+    putOpts = {
+      metadata: { ...metadata, attempts } satisfies SecretMetadata,
+      expirationTtl: remaining,
+    }
+  } else {
+    // Legacy record without expiresAt — fall back to the old behavior.
+    // Harmless: legacy records created before this deploy expire within
+    // CONFIG.maxTtl (7 days) and will migrate to the new path on their own.
+    putOpts = {
+      metadata: { ...metadata, attempts } satisfies SecretMetadata,
+      expirationTtl: CONFIG.defaultTtl,
+    }
+  }
+  await c.env.SECRETS_STORE.put(id, value, putOpts)
+  noteSent(c, markFailed(c.env, id, false))
+  return c.json({ error: `RETRY_${CONFIG.maxAttempts - attempts}` }, 403)
 }
 
 // Retrieve encrypted secret from KV (verifier check + burn-on-read)
@@ -1344,39 +1578,7 @@ app.post('/api/v1/public/secrets/:id/retrieve', async (c) => {
   }
 
   if (!safeCompare(metadata.verifier, verifierCandidate)) {
-    const attempts = (metadata.attempts ?? 0) + 1
-    if (attempts >= CONFIG.maxAttempts) {
-      await c.env.SECRETS_STORE.delete(id)
-      return c.json({ error: 'TERMINATED' }, 410)
-    }
-    // Preserve the secret's original expiration when bumping the attempt
-    // counter — previously we blindly reset to CONFIG.defaultTtl on every
-    // failed attempt, so an attacker could keep a short-TTL secret alive
-    // indefinitely by stopping at attempt 2 and resetting the clock.
-    let putOpts: KVNamespacePutOptions
-    if (metadata.expiresAt) {
-      const remaining = metadata.expiresAt - Math.floor(Date.now() / 1000)
-      // KV requires expirationTtl ≥ 60 s; if less remains, burn the secret
-      // instead of stretching the window.
-      if (remaining < 60) {
-        await c.env.SECRETS_STORE.delete(id)
-        return c.json({ error: 'TERMINATED' }, 410)
-      }
-      putOpts = {
-        metadata: { ...metadata, attempts } satisfies SecretMetadata,
-        expirationTtl: remaining,
-      }
-    } else {
-      // Legacy record without expiresAt — fall back to the old behavior.
-      // Harmless: legacy records created before this deploy expire within
-      // CONFIG.maxTtl (7 days) and will migrate to the new path on their own.
-      putOpts = {
-        metadata: { ...metadata, attempts } satisfies SecretMetadata,
-        expirationTtl: CONFIG.defaultTtl,
-      }
-    }
-    await c.env.SECRETS_STORE.put(id, value, putOpts)
-    return c.json({ error: `RETRY_${CONFIG.maxAttempts - attempts}` }, 403)
+    return rejectBadVerifier(c, id, value, metadata)
   }
 
   // Bound secrets survive the read, which is the point of the mode, so they take
@@ -1386,7 +1588,57 @@ app.post('/api/v1/public/secrets/:id/retrieve', async (c) => {
   }
 
   await c.env.SECRETS_STORE.delete(id)
+  noteSent(c, markOpened(c.env, id))
   return c.json({ encryptedData: value })
+})
+
+// Emergency destruction by the recipient, for secrets that outlive the first
+// read. The right to destroy is the right to read: the caller has to clear the
+// same gates retrieve imposes, so knowing an identifier is never enough.
+app.post('/api/v1/public/secrets/:id/forget', async (c) => {
+  const id = c.req.param('id')
+  const body = await c.req.json<RetrieveBody>()
+
+  // No Turnstile here, and deliberately so. This endpoint is reachable only by
+  // a caller holding the binding cookie, a server-issued 256-bit token, and a
+  // signature over a fresh challenge. That gate strictly dominates a bot
+  // challenge. Demanding one as well would also deadlock the flow: Turnstile
+  // tokens are single-use and the client spent its token on the read that put
+  // the destroy button on screen.
+  const { value, metadata } = await c.env.SECRETS_STORE.getWithMetadata<SecretMetadata>(id)
+  if (!value || !metadata) return c.json({ error: 'NOT_FOUND' }, 404)
+
+  // A one-time secret is already gone by the time anyone could ask, so this
+  // endpoint exists only for the modes that survive the first read. Refusing
+  // here leaks nothing: the receive page states the mode on load anyway.
+  if (!metadata.bindMode) return c.json({ error: 'FORGET_NOT_APPLICABLE' }, 400)
+
+  // Only the bound client may destroy, never the first reader who has yet to
+  // claim. Otherwise anyone holding link and passphrase could destroy a secret
+  // before its intended recipient ever opened it.
+  const gate = await handleBoundRetrieve(c, id, metadata, body)
+  if (typeof gate !== 'string') return gate
+  if (gate !== 'proven') return c.json({ error: 'BOUND_TO_OTHER_DEVICE' }, 403)
+
+  if (!safeCompare(metadata.verifier, body.verifierCandidate)) {
+    return rejectBadVerifier(c, id, value, metadata)
+  }
+
+  await destroySecret(c.env, id)
+  noteSent(
+    c,
+    c.env.DB.prepare(
+      "UPDATE sent_secrets SET status='forgotten', revoked_at=COALESCE(revoked_at,?) WHERE secret_id=?"
+    )
+      .bind(Math.floor(Date.now() / 1000), id)
+      .run()
+  )
+
+  // The binding row is gone, so the cookie can no longer authorise anything.
+  // Clearing it anyway keeps a dead credential from sitting in the jar.
+  setCookie(c, bindCookieKey(id), '', { prefix: 'host', httpOnly: true, sameSite: 'Strict', maxAge: 0 })
+
+  return c.json({ ok: true })
 })
 
 // Storage stats + file list
@@ -1655,7 +1907,7 @@ async function verifyFilePassword(input: string, f: FileRecord, pepper: string):
   return legacyHash !== null && safeCompare(legacyHash, f.password_hash)
 }
 
-async function handleFileDownload(c: Context<{ Bindings: Bindings }>): Promise<Response> {
+async function handleFileDownload(c: Context<AppEnv>): Promise<Response> {
   const id = c.req.param('id')
   if (!id) return c.text('BAD_REQUEST', 400)
   const env = c.env
@@ -1720,7 +1972,7 @@ async function handleFileDownload(c: Context<{ Bindings: Bindings }>): Promise<R
   return serveFile(c, id, f)
 }
 
-async function handleFilePost(c: Context<{ Bindings: Bindings }>): Promise<Response> {
+async function handleFilePost(c: Context<AppEnv>): Promise<Response> {
   const id = c.req.param('id')
   if (!id) return c.text('BAD_REQUEST', 400)
   const env = c.env
@@ -1785,7 +2037,7 @@ async function handleFilePost(c: Context<{ Bindings: Bindings }>): Promise<Respo
   return serveFile(c, id, f)
 }
 
-async function serveFile(c: Context<{ Bindings: Bindings }>, id: string, f: FileRecord): Promise<Response> {
+async function serveFile(c: Context<AppEnv>, id: string, f: FileRecord): Promise<Response> {
   const env = c.env
   const curDL = (f.download_count ?? 0) + 1
   const shouldBurn = f.max_downloads !== -1 && curDL >= f.max_downloads
@@ -1831,6 +2083,10 @@ async function handleScheduled(_event: ScheduledEvent, env: Bindings): Promise<v
   const nowSec = Math.floor(Date.now() / 1000)
   await env.DB.prepare('DELETE FROM secret_bindings WHERE expires_at < ?').bind(nowSec).run()
   await env.DB.prepare('DELETE FROM bind_nonces WHERE expires_at < ?').bind(nowSec).run()
+
+  // Ledger rows outlive their secret by CONFIG.sentGrace, which is why this
+  // compares against purge_at and not expires_at.
+  await env.DB.prepare('DELETE FROM sent_secrets WHERE purge_at < ?').bind(nowSec).run()
 }
 
 // ── Export ────────────────────────────────────────────────────────────────────
@@ -1847,6 +2103,9 @@ export default {
 const CSS = `
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
 :root {
+  /* Without this the browser paints its own light-mode chrome on a dark page:
+     scrollbars, the textarea resize grip, form control defaults. */
+  color-scheme: dark;
   --accent: #818cf8;
   --accent-dim: rgba(129,140,248,0.07);
   --accent-glow: rgba(129,140,248,0.12);
@@ -1877,6 +2136,12 @@ body::before{content:'';position:fixed;top:50%;left:50%;width:min(700px,90vw);he
 .tab.active{color:var(--accent);background:var(--accent-dim)}
 .tab.active::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;background:var(--accent)}
 .label-row{display:flex;justify-content:space-between;align-items:center;font-weight:600;font-size:0.65rem;text-transform:uppercase;margin-bottom:8px;color:var(--text-muted);letter-spacing:0.12em}
+.gen-controls{display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:normal}
+.gen-mode{width:auto;margin-bottom:0;padding:3px 22px 3px 8px;font-size:0.6rem;font-weight:600;letter-spacing:0.04em;background:var(--surface-2) no-repeat right 7px center;background-image:linear-gradient(45deg,transparent 50%,var(--text-muted) 50%),linear-gradient(135deg,var(--text-muted) 50%,transparent 50%);background-size:4px 4px,4px 4px;background-position:calc(100% - 11px) calc(50% + 1px),calc(100% - 7px) calc(50% + 1px);cursor:pointer}
+/* Entropy is stated because a generator that silently produces something weak
+   is worse than no generator. The number is the honest log2 of the space the
+   selected mode draws from. */
+.gen-meta{font-size:0.6rem;color:var(--text-muted);letter-spacing:0.03em;line-height:1.5;margin:-12px 0 16px;min-height:1em}
 .action-link{cursor:pointer;color:var(--accent);font-size:0.65rem;background:var(--accent-dim);padding:3px 10px;transition:all 0.2s;font-weight:600;letter-spacing:0.06em;border:1px solid transparent}
 .action-link:hover{background:var(--accent);color:var(--bg)}
 textarea,input,select{width:100%;border:1px solid var(--border-strong);padding:13px 15px;font-size:0.88rem;border-radius:0;margin-bottom:18px;outline:none;background:var(--surface-2);color:var(--text);transition:border-color 0.2s,box-shadow 0.2s;-webkit-appearance:none;appearance:none}
@@ -1916,6 +2181,42 @@ textarea{min-height:120px;font-family:'Inter',monospace;resize:vertical}
 .modal-btn{margin-top:20px;width:100%;padding:12px;background:var(--accent);color:var(--bg);border:none;border-radius:0;font-weight:700;cursor:pointer;text-transform:uppercase;font-size:0.72rem;letter-spacing:0.12em;transition:opacity 0.15s}
 .modal-btn:hover{opacity:0.85}
 pre{background:var(--surface-2);color:var(--accent);padding:20px;white-space:pre-wrap;word-break:break-all;font-size:0.92rem;margin-bottom:22px;font-family:'Courier New',monospace;border:1px solid var(--border-strong);border-left:2px solid var(--accent)}
+/* ── Shoulder-surfing protection ──
+   Masking is done with a transparent text colour plus a blurred text-shadow
+   rather than filter:blur() on the element. Both smear the glyphs identically
+   — the shadow is a blurred copy of the glyph alpha — but filter:blur() also
+   smears the block's own border and background, which made the panel look
+   broken rather than deliberately hidden. This way the chrome stays crisp and
+   only the characters dissolve.
+
+   The radius is in em so it scales with the font: a fixed pixel radius that is
+   illegible at 0.92rem becomes readable the moment someone zooms in. At 0.5em
+   there is no glyph edge left to reconstruct by eye. The shadow is stacked
+   twice so the smear reads as "content is here" instead of an empty box.
+
+   Selection is disabled so a drag cannot lift the plaintext out from under the
+   mask; the copy button is the sanctioned path and works either way. */
+.secret-wrap{position:relative;overflow:hidden}
+pre.masked{color:transparent;text-shadow:0 0 0.5em var(--text-muted),0 0 0.5em var(--text-muted);user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;transition:color 0.12s ease,text-shadow 0.12s ease}
+/* Both controls carry the accent so the pair reads as one action group, and
+   both clear the 44px WCAG 2.5.5 target floor — a hold gesture on anything
+   shorter is easy to slip off of on touch.
+
+   The row wraps on its own rather than switching layout at a fixed breakpoint:
+   the reveal label is the longest string on the page in several languages, so a
+   single media query would be wrong in half of them. flex-basis states the width
+   each control wants and the browser stacks them the moment they no longer fit. */
+.reveal-row{display:flex;flex-wrap:wrap;gap:10px}
+.reveal-row .btn{flex:1 1 210px;min-height:44px;padding:12px 14px;font-size:0.68rem;letter-spacing:0.07em;line-height:1.35;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
+.reveal-row .btn-copy{flex:1 1 130px;min-height:44px;min-width:0;padding:12px 14px;background:var(--accent);color:var(--bg);border:none;font-weight:700;font-size:0.68rem;letter-spacing:0.07em;line-height:1.35}
+.reveal-row .btn-copy:hover{background:var(--accent);color:var(--bg);box-shadow:0 0 30px -8px var(--accent-glow)}
+.btn.revealed{background:var(--surface-2);color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+@media (prefers-reduced-motion:reduce){pre.masked{transition:none}}
+/* Forced-colours modes drop text-shadow entirely, which would unmask the
+   secret. Fall back to blurring the element there — losing the crisp border is
+   a far better outcome than losing the mask. */
+@media (forced-colors:active){pre.masked{color:transparent;filter:blur(0.5em)}}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .hidden{display:none!important}
 .spinner{width:14px;height:14px;border:2px solid rgba(0,0,0,0.2);border-top-color:var(--bg);border-radius:50%;animation:rot 0.6s linear infinite;display:none}
 @keyframes rot{to{transform:rotate(360deg)}}
@@ -1930,6 +2231,55 @@ footer{margin-top:28px;color:var(--text-dim);font-size:0.7rem;text-align:center;
 .cfg-toggle svg{width:15px;height:15px}
 .cfg-panel{position:fixed;top:56px;right:18px;z-index:10;background:var(--surface);border:1px solid var(--border-strong);padding:16px 20px;animation:cardIn 0.2s cubic-bezier(0.16,1,0.3,1);min-width:200px}
 .cfg-panel::before{content:'';position:absolute;top:0;left:50%;right:50%;height:1px;background:var(--accent);animation:drawLine 0.3s cubic-bezier(0.16,1,0.3,1) forwards}
+.sent-section{margin-top:36px;padding-top:4px;border-top:1px solid var(--border)}
+.sent-toggle{width:100%;display:flex;align-items:center;gap:12px;padding:14px 0;background:transparent;border:none;cursor:pointer;text-align:left;color:var(--text-muted);transition:color 0.2s}
+.sent-toggle:hover{color:var(--accent)}
+.sent-toggle-label{font-weight:600;font-size:0.65rem;text-transform:uppercase;letter-spacing:0.12em;flex-shrink:0}
+.sent-count{margin-left:7px;opacity:0.65;letter-spacing:0.06em}
+.sent-who{font-size:0.6rem;color:var(--text-muted);font-weight:500;letter-spacing:0.03em;text-transform:none;word-break:break-all;text-align:right;margin-left:auto;line-height:1.3}
+.sent-chev{width:15px;height:15px;flex-shrink:0;transition:transform 0.32s cubic-bezier(0.16,1,0.3,1)}
+.sent-section.open .sent-chev{transform:rotate(180deg)}
+/* 0fr to 1fr animates to the content's natural height, which a max-height
+   transition cannot do without guessing a number that is wrong for every list
+   but one. The inner wrapper supplies the min-height:0 the grid row needs in
+   order to actually collapse. */
+.sent-body{display:grid;grid-template-rows:0fr;opacity:0;transition:grid-template-rows 0.32s cubic-bezier(0.16,1,0.3,1),opacity 0.22s ease}
+.sent-section.open .sent-body{grid-template-rows:1fr;opacity:1}
+.sent-body-inner{min-height:0;overflow:hidden}
+.sent-hint{font-size:0.6rem;color:var(--text-muted);line-height:1.6;margin:0 0 10px}
+/* Only tall lists scroll, and when they do the bar is a hairline in the theme
+   rather than the platform's default slab. */
+.hist-list{max-height:min(46vh,400px);overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--border-strong) transparent}
+.hist-list::-webkit-scrollbar{width:5px}
+.hist-list::-webkit-scrollbar-track{background:transparent}
+.hist-list::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:3px}
+.hist-list::-webkit-scrollbar-thumb:hover{background:var(--text-muted)}
+.hist-empty{font-size:0.72rem;color:var(--text-muted);padding:4px 0 8px}
+.hist-item{border-top:1px solid var(--border);padding:11px 0;display:flex;flex-direction:column;gap:4px}
+.hist-item:first-of-type{border-top:none}
+.hist-id{font-size:0.7rem;font-weight:600;letter-spacing:0.03em;color:var(--text);word-break:break-all}
+.hist-meta{font-size:0.6rem;color:var(--text-muted);letter-spacing:0.03em;line-height:1.5}
+.hist-foot{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-top:2px}
+/* Status and revoke are deliberately one shared shape. They sit on the same
+   row at the same height, so the column reads as a pair of aligned controls
+   rather than two differently sized pills stacked on top of each other. */
+.hist-badge,.hist-revoke{font-size:0.56rem;font-weight:700;text-transform:uppercase;letter-spacing:0.1em;line-height:1.6;padding:4px 10px;border:1px solid var(--border-strong);background:transparent;white-space:nowrap;flex-shrink:0}
+.hist-badge{color:var(--text-muted)}
+.hist-badge.is-open{color:var(--success);border-color:var(--success)}
+.hist-badge.is-gone{color:var(--danger);border-color:var(--danger)}
+.hist-revoke{border-color:var(--danger);color:var(--danger);cursor:pointer;transition:background 0.15s,color 0.15s}
+.hist-revoke:hover{background:rgba(248,113,113,0.12)}
+.hist-revoke.armed{background:var(--danger);color:#000}
+.hist-revoke:disabled{opacity:0.45;cursor:default;color:var(--text-muted);border-color:var(--border)}
+/* Destructive and irreversible, so it is red at rest rather than only on
+   hover, and it sits below a divider so it can never be mistaken for one of
+   the primary actions above it. */
+.forget-row{margin-top:20px;padding-top:16px;border-top:1px solid var(--border);display:flex;flex-direction:column;align-items:center;gap:8px}
+.forget-note{font-size:0.6rem;color:var(--text-muted);line-height:1.5;text-align:center}
+.btn-forget{width:100%;padding:12px;background:transparent;border:1px solid var(--danger);color:var(--danger);font-size:0.68rem;font-weight:700;text-transform:uppercase;letter-spacing:0.11em;cursor:pointer;transition:background 0.15s,color 0.15s}
+.btn-forget:hover{background:rgba(248,113,113,0.12)}
+.btn-forget.armed{background:var(--danger);color:#000}
+.btn-forget:disabled{opacity:0.5;cursor:default}
 .cfg-row{display:flex;align-items:center;justify-content:space-between;gap:12px}
 .cfg-label{font-size:0.62rem;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--text-muted)}
 .cfg-color{-webkit-appearance:none;appearance:none;width:28px;height:28px;border:1px solid var(--border-strong);padding:0;cursor:pointer;background:none;transition:border-color 0.2s}
@@ -1955,7 +2305,7 @@ footer{margin-top:28px;color:var(--text-dim);font-size:0.7rem;text-align:center;
 .cfg-upload:hover{border-color:var(--accent);color:var(--accent)}
 .cfg-upload-del:hover{border-color:var(--danger)!important;color:var(--danger)!important}
 .cfg-logo-preview{max-height:32px;max-width:120px;object-fit:contain}
-[data-theme="light"]{--bg:#eeeef5;--surface:#f8f8fc;--surface-2:#e4e4ee;--surface-3:#d8d8e8;--text:#14141e;--text-muted:rgba(20,20,30,0.45);--text-dim:rgba(20,20,30,0.22);--border:rgba(0,0,0,0.08);--border-strong:rgba(0,0,0,0.14)}
+[data-theme="light"]{color-scheme:light;--bg:#eeeef5;--surface:#f8f8fc;--surface-2:#e4e4ee;--surface-3:#d8d8e8;--text:#14141e;--text-muted:rgba(20,20,30,0.45);--text-dim:rgba(20,20,30,0.22);--border:rgba(0,0,0,0.08);--border-strong:rgba(0,0,0,0.14)}
 .theme-toggle{position:fixed;top:18px;left:18px;z-index:10;width:32px;height:32px;display:flex;align-items:center;justify-content:center;cursor:pointer;border:1px solid var(--border);background:var(--surface);color:var(--text-muted);font-size:14px;transition:color 0.2s,border-color 0.2s}
 .theme-toggle:hover{color:var(--accent);border-color:var(--accent)}
 ${LANG_PICKER_CSS}
@@ -2246,12 +2596,56 @@ async function shorten(){
     });
 })();
 
-function showQR(url){
-    get('qrImg').src='/ui/qr?d='+encodeURIComponent(url);
+// Loaded once, then cached; sessions that never open a QR code never fetch it.
+var _qrPromise = null;
+
+function _qrLib(){
+    if(!_qrPromise){
+        _qrPromise = new Promise(function(resolve, reject){
+            if (window.qrcode) return resolve(window.qrcode);
+            var s = document.createElement('script');
+            s.src = '/ui/qrcode.v1.js';
+            s.onload = function(){ window.qrcode ? resolve(window.qrcode) : reject(new Error('QR_LOAD')); };
+            s.onerror = function(){ reject(new Error('QR_LOAD')); };
+            document.head.appendChild(s);
+        }).catch(function(e){ _qrPromise = null; throw e; });
+    }
+    return _qrPromise;
+}
+
+// Built from the module grid and handed to <img> as a data URI, which
+// img-src 'self' data: already allows.
+function _qrSvg(qr){
+    var n = qr.getModuleCount(), pad = 4, cells = '';
+    for (var r = 0; r < n; r++) {
+        for (var c = 0; c < n; c++) {
+            if (qr.isDark(r, c)) cells += '<rect x="' + (c + pad) + '" y="' + (r + pad) + '" width="1" height="1"/>';
+        }
+    }
+    var size = n + pad * 2;
+    return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + size + ' ' + size +
+        '" shape-rendering="crispEdges"><rect width="' + size + '" height="' + size +
+        '" fill="white"/><g fill="black">' + cells + '</g></svg>';
+}
+
+// Built entirely in the browser; the link is not sent anywhere to draw it.
+async function showQR(url){
     get('qrTxt').textContent=url;
     var qt=get('qrTitle');if(qt)qt.textContent=window.L.qr_title;
     var qc=get('qrCloseBtn');if(qc)qc.textContent=window.L.qr_close;
+    var img=get('qrImg');
+    img.removeAttribute('src');
     get('qrOv').style.display='flex';
+    try {
+        var factory = await _qrLib();
+        var qr = factory(0, 'M');
+        qr.addData(url, 'Byte');
+        qr.make();
+        img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(_qrSvg(qr));
+    } catch (e) {
+        get('qrOv').style.display='none';
+        modal(window.L.js_error, window.L.qr_failed);
+    }
 }
 function escapeHtml(u) { return u.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;"); }
 
@@ -2333,7 +2727,159 @@ const _ALPHA_BODY = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!?@'
 // hash, question mark, ampersand or any other reserved separator.
 const _ALPHA_URL_KEY = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789-_~';
 
-const genS  = () => { const v = _randString(_ALPHA_BODY,    15); if (get('body')) get('body').value = v; };
+// ── Password generator standards ────────────────────────────────────────────
+// All of this runs in the browser on crypto.getRandomValues; the server is
+// never told what was generated.
+
+// Restricted set most corporate validators accept. Wider sets get rejected by
+// exactly the systems this mode exists to satisfy.
+const _ALPHA_LEGACY_SPECIAL = '!@#$%^&*';
+const _ALPHA_LOWER = 'abcdefghijklmnopqrstuvwxyz';
+const _ALPHA_UPPER = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+const _ALPHA_DIGIT = '0123456789';
+
+var _GEN_MODE_KEY = 'es-gen-mode';
+
+// Size is asserted on arrival: a truncated or substituted list would silently
+// reduce entropy below what the UI claims, so it is refused rather than used.
+var _WORDLISTS = {
+    eff:   { url: '/ui/words-eff.v1.txt',   size: 7776 },
+    bip39: { url: '/ui/words-bip39.v1.txt', size: 2048 },
+};
+var _wordsCache = {};
+
+function _words(list) {
+    const spec = _WORDLISTS[list];
+    if (!_wordsCache[list]) {
+        _wordsCache[list] = fetch(spec.url)
+            .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
+            .then(t => {
+                // Escape doubled on purpose: this script is a template literal
+                // in the Worker source, so a single backslash would emit a real
+                // line break here and break the bundle.
+                const w = t.split('\\n').filter(Boolean);
+                if (w.length !== spec.size) throw new Error('WORDLIST_SIZE');
+                return w;
+            })
+            .catch(e => { _wordsCache[list] = null; throw e; });
+    }
+    return _wordsCache[list];
+}
+
+function _randInt(bound) {
+    // Rejection sampling on 32 bits; a plain modulo would bias the low indices.
+    const limit = Math.floor(0x100000000 / bound) * bound;
+    const buf = new Uint32Array(1);
+    let v;
+    do { crypto.getRandomValues(buf); v = buf[0]; } while (v >= limit);
+    return v % bound;
+}
+
+function _shuffle(arr) {
+    for (let i = arr.length - 1; i > 0; i--) {
+        const j = _randInt(i + 1);
+        const t = arr[i]; arr[i] = arr[j]; arr[j] = t;
+    }
+    return arr;
+}
+
+function _b64(bytes) {
+    let s = '';
+    for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+    return btoa(s);
+}
+
+// One of each required class, then shuffled so they do not always land in the
+// same positions.
+function _genLegacy() {
+    const all = _ALPHA_LOWER + _ALPHA_UPPER + _ALPHA_DIGIT + _ALPHA_LEGACY_SPECIAL;
+    const out = [
+        _ALPHA_LOWER[_randInt(_ALPHA_LOWER.length)],
+        _ALPHA_UPPER[_randInt(_ALPHA_UPPER.length)],
+        _ALPHA_DIGIT[_randInt(_ALPHA_DIGIT.length)],
+        _ALPHA_LEGACY_SPECIAL[_randInt(_ALPHA_LEGACY_SPECIAL.length)],
+    ];
+    while (out.length < 12) out.push(all[_randInt(all.length)]);
+    return _shuffle(out).join('');
+}
+
+// _randInt rejects out-of-range draws, so a 7776-word list is as unbiased as a
+// 2048-word one despite not being a power of two.
+function _genPassphrase(words, count) {
+    const out = [];
+    for (let i = 0; i < count; i++) out.push(words[_randInt(words.length)]);
+    return out.join('-');
+}
+
+// Stated entropy is a floor. Legacy counts its four class-guaranteed characters
+// at their real alphabet sizes and does not credit the shuffle.
+var _GEN_SPECS = {
+    nist:      { length: 20, bits: Math.floor(20 * Math.log2(_ALPHA_BODY.length)) },
+    eff:       { list: 'eff',   words: 6, bits: Math.floor(6 * Math.log2(7776)) },
+    // Twelve uniform draws, so 132 bits. Not a real BIP-39 seed phrase, whose
+    // tail is a checksum and whose entropy is 128 bits.
+    bip39:     { list: 'bip39', words: 12, bits: 12 * 11 },
+    legacy:    { length: 12, bits: Math.floor(
+                     Math.log2(26) + Math.log2(26) + Math.log2(10) + Math.log2(8)
+                     + 8 * Math.log2(26 + 26 + 10 + 8)) },
+    key256:    { bytes: 32,  bits: 256 },
+    key512:    { bytes: 64,  bits: 512 },
+};
+
+function _genMode() {
+    const sel = get('genMode');
+    return sel && _GEN_SPECS[sel.value] ? sel.value : 'nist';
+}
+
+function _genMeta(mode) {
+    const el = get('genMeta');
+    if (!el) return;
+    const spec = _GEN_SPECS[mode];
+    el.innerText = spec ? window.L.gen_entropy.replace('{n}', spec.bits) : '';
+}
+
+function onGenMode() {
+    const mode = _genMode();
+    try { localStorage.setItem(_GEN_MODE_KEY, mode); } catch (e) { }
+    _genMeta(mode);
+    // Warmed while the user is still reading, so the first click does not wait.
+    const spec = _GEN_SPECS[mode];
+    if (spec && spec.list) _words(spec.list).catch(() => { });
+}
+
+function initGen() {
+    const sel = get('genMode');
+    if (!sel) return;
+    try {
+        const saved = localStorage.getItem(_GEN_MODE_KEY);
+        if (saved && _GEN_SPECS[saved]) sel.value = saved;
+    } catch (e) { }
+    _genMeta(_genMode());
+}
+
+async function genS() {
+    const mode = _genMode();
+    const body = get('body');
+    if (!body) return;
+    const spec = _GEN_SPECS[mode];
+    let v;
+    try {
+        if (spec.list) {
+            v = _genPassphrase(await _words(spec.list), spec.words);
+        } else if (mode === 'legacy') {
+            v = _genLegacy();
+        } else if (mode === 'key256' || mode === 'key512') {
+            v = _b64(crypto.getRandomValues(new Uint8Array(_GEN_SPECS[mode].bytes)));
+        } else {
+            v = _randString(_ALPHA_BODY, _GEN_SPECS.nist.length);
+        }
+    } catch (e) {
+        return modal(window.L.js_error, window.L.gen_wordlist_failed);
+    }
+    body.value = v;
+    _genMeta(mode);
+}
+
 const genK  = () => { const v = _randString(_ALPHA_URL_KEY, 20); if (get('pass')) get('pass').value = v; };
 const genFK = () => { const v = _randString(_ALPHA_URL_KEY, 20); if (get('fpwd')) get('fpwd').value = v; };
 
@@ -2382,11 +2928,17 @@ async function processStore() {
     try {
         const id = crypto.randomUUID(), key = await derive(p, id, 'k'), iv = crypto.getRandomValues(new Uint8Array(12));
         const enc = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(b)), vf = await derive(p, id, 'v');
-        await fetch('/api/v1/admin/secrets', { method: 'POST', body: JSON.stringify({ id, verifier: vf, ttl, bindMode, allowFallback, algoVersion: window.__algo || 'argon2id-v1', encryptedData: JSON.stringify({ iv: btoa(String.fromCharCode(...iv)), d: btoa(String.fromCharCode(...new Uint8Array(enc))) }) }) });
+        const res = await fetch('/api/v1/admin/secrets', { method: 'POST', body: JSON.stringify({ id, verifier: vf, ttl, bindMode, allowFallback, algoVersion: window.__algo || 'argon2id-v1', encryptedData: JSON.stringify({ iv: btoa(String.fromCharCode(...iv)), d: btoa(String.fromCharCode(...new Uint8Array(enc))) }) }) });
+        // A link for a secret the server refused to store would be a dead page.
+        if (!res.ok) {
+            const j = await res.json().catch(() => ({}));
+            throw new Error(_errMsg(j.error));
+        }
         get('v-create').classList.add('hidden'); get('v-result').classList.remove('hidden');
         const base = location.origin + '/receive/' + id;
         get('linkS').value = base; get('linkE').value = base + '#' + encodeURIComponent(p);
-    } catch (e) { modal(window.L.js_error, window.L.js_server_error); } finally { setL(get('btnGo'), 0); }
+        loadSent();
+    } catch (e) { modal(window.L.js_error, e.message || window.L.js_server_error); } finally { setL(get('btnGo'), 0); }
 }
 
 const CHUNK = 50 * 1024 * 1024;
@@ -2612,6 +3164,129 @@ async function del(id) {
     }
 }
 
+// ── Sent secrets panel ──────────────────────────────────────────────────────
+// Identifiers and timestamps only. Without the passphrase, which never leaves
+// the fragment, an identifier decrypts nothing.
+
+// Terminal states have nothing left to revoke, so the button is dropped.
+var _SENT_GONE = ['revoked', 'forgotten', 'burned', 'expired'];
+
+function _sentLabel(status) {
+    return window.L['sent_status_' + status] || status;
+}
+
+function _sentWhen(epochSec) {
+    if (!epochSec) return '';
+    const lang = document.documentElement.lang || 'en';
+    const d = new Date(epochSec * 1000);
+    try { return d.toLocaleString(lang); } catch (e) { return d.toISOString(); }
+}
+
+function _sentRow(s) {
+    const gone = _SENT_GONE.indexOf(s.status) !== -1;
+    const cls = s.status === 'opened' ? ' is-open' : gone ? ' is-gone' : '';
+    let meta = escapeHtml(window.L.sent_col_created) + ': ' + escapeHtml(_sentWhen(s.created_at));
+    if (s.open_count > 0) {
+        meta += ' · ' + escapeHtml(window.L.sent_opens) + ': ' + s.open_count;
+    }
+    if (s.failed_attempts > 0) {
+        meta += ' · ' + escapeHtml(window.L.sent_failed) + ': ' + s.failed_attempts;
+    }
+    const btn = gone
+        ? ''
+        : '<button class="hist-revoke" data-click="revokeSecret" data-id="' + escapeHtml(s.secret_id) + '">'
+          + escapeHtml(window.L.sent_revoke) + '</button>';
+    // Status and revoke share a row and identical metrics so the list aligns.
+    return '<div class="hist-item">'
+        + '<div class="hist-id">' + escapeHtml(s.secret_id) + '</div>'
+        + '<div class="hist-meta">' + meta + '</div>'
+        + '<div class="hist-foot"><span class="hist-badge' + cls + '">'
+        + escapeHtml(window.L.sent_status_label) + ': ' + escapeHtml(_sentLabel(s.status))
+        + '</span>' + btn + '</div></div>';
+}
+
+async function loadSent() {
+    const box = get('histBody');
+    if (!box) return;
+    box.className = 'hist-empty';
+    box.innerText = window.L.sent_loading;
+    try {
+        const r = await fetch('/api/v1/admin/secrets');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const d = await r.json();
+        // Names the account so it is clear whose list this is.
+        const who = get('sentWho');
+        if (who) who.innerText = d.email ? window.L.sent_signed_in + ' ' + d.email : '';
+        // Lets the collapsed header say whether it is worth opening.
+        const cnt = get('sentCount');
+        if (cnt) cnt.innerText = d.secrets && d.secrets.length ? '(' + d.secrets.length + ')' : '';
+        if (!d.secrets || !d.secrets.length) {
+            box.className = 'hist-empty';
+            box.innerText = window.L.sent_empty;
+            return;
+        }
+        box.className = 'hist-list';
+        box.innerHTML = d.secrets.map(_sentRow).join('');
+    } catch (e) {
+        box.className = 'hist-empty';
+        box.innerText = window.L.sent_error;
+    }
+}
+
+var _SENT_OPEN_KEY = 'es-sent-open';
+
+function toggleSent() {
+    const sec = get('sentSection');
+    if (!sec) return;
+    const open = !sec.classList.contains('open');
+    sec.classList.toggle('open', open);
+    const btn = sec.querySelector('.sent-toggle');
+    if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    try { localStorage.setItem(_SENT_OPEN_KEY, open ? '1' : '0'); } catch (e) { }
+}
+
+// The list always loads so the collapsed header can carry the count and the
+// account. Only the disclosure state is remembered.
+function initSent() {
+    if (!get('histBody')) return;
+    let open = false;
+    try { open = localStorage.getItem(_SENT_OPEN_KEY) === '1'; } catch (e) { }
+    if (open) {
+        const sec = get('sentSection');
+        if (sec) {
+            sec.classList.add('open');
+            const btn = sec.querySelector('.sent-toggle');
+            if (btn) btn.setAttribute('aria-expanded', 'true');
+        }
+    }
+    loadSent();
+}
+
+// Two-step rather than a modal: arming in place keeps the row on screen.
+async function revokeSecret(el) {
+    if (!el.classList.contains('armed')) {
+        el.classList.add('armed');
+        el.innerText = window.L.sent_revoke_confirm;
+        setTimeout(function () {
+            if (!el.isConnected) return;
+            el.classList.remove('armed');
+            el.innerText = window.L.sent_revoke;
+        }, 5000);
+        return;
+    }
+    el.disabled = true;
+    try {
+        const r = await fetch('/api/v1/admin/secrets/' + encodeURIComponent(el.dataset.id), { method: 'DELETE' });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        loadSent();
+    } catch (e) {
+        el.disabled = false;
+        el.classList.remove('armed');
+        el.innerText = window.L.sent_revoke;
+        modal(window.L.js_error, window.L.sent_error);
+    }
+}
+
 // ── Device binding (client) ─────────────────────────────────────────────────
 // The private key never leaves the browser. For the 'device' factor it is
 // generated non-extractable, so no API can export its bytes and an injected
@@ -2789,6 +3464,8 @@ function _errMsg(code) {
         BIND_CHALLENGE_INVALID: window.L.js_bind_retry,
         BIND_NO_ASSERTION: window.L.js_bind_unsupported,
         BIND_SYNCED_PASSKEY: window.L.js_bind_synced,
+        ID_TAKEN: window.L.js_err_id_taken,
+        FORGET_NOT_APPLICABLE: window.L.forget_error,
     };
     return m[code] || code;
 }
@@ -2840,6 +3517,13 @@ async function start(p, bid) {
             const bu = get('bindUntil');
             if (bu) { bu.innerText = window.L.js_bind_until + _fmtUntil(boundUntil); bu.classList.remove('hidden'); }
         }
+        // Only a bound secret outlives its first read. The verifier stays in
+        // memory for that call and is never written anywhere.
+        if (json.bound) {
+            _forgetState = { id: id, vf: vf };
+            const fr = get('forgetRow');
+            if (fr) fr.classList.remove('hidden');
+        }
         const timerLabel = boundUntil ? window.L.js_hide_timer : window.L.js_timer;
         let tl = 300;
         const tick = () => {
@@ -2881,10 +3565,67 @@ function onTsFile(token) {
   if (form && !hasPwd) form.submit();
 }
 
+// ── Destroy on demand (recipient) ───────────────────────────────────────────
+// Set only after a successful read of a bound secret. Keeping the verifier here
+// avoids a second Argon2id run; it dies with the page.
+var _forgetState = null;
+
+async function _forgetKeyDrop(id) {
+    try {
+        const db = await _idbOpen();
+        await _idbReq(db.transaction(_IDB_STORE, 'readwrite').objectStore(_IDB_STORE).delete(id));
+    } catch (e) { }
+}
+
+async function forgetSecret(el) {
+    if (!_forgetState) return;
+    if (!el.classList.contains('armed')) {
+        el.classList.add('armed');
+        el.innerText = window.L.forget_confirm;
+        setTimeout(function () {
+            if (!el.isConnected) return;
+            el.classList.remove('armed');
+            el.innerText = window.L.forget_btn;
+        }, 5000);
+        return;
+    }
+    el.disabled = true;
+    const st = _forgetState;
+    try {
+        const post = (extra) => fetch('/api/v1/public/secrets/' + st.id + '/forget', {
+            method: 'POST',
+            body: JSON.stringify(Object.assign({ verifierCandidate: st.vf }, extra || {})),
+        });
+        let res = await post({});
+        let json = await res.json();
+        // Same two-leg handshake as a read.
+        if (res.status === 401 && json.error === 'BIND_CHALLENGE') {
+            res = await post(await _bindProve(st.id, json.factor, json.challenge, json.credId));
+            json = await res.json();
+        }
+        if (!res.ok) throw new Error(_errMsg(json.error));
+
+        await _forgetKeyDrop(st.id);
+        _forgetState = null;
+        // Nothing on screen should survive the secret it belongs to.
+        const content = get('content');
+        if (content) content.innerText = '';
+        ['v-decrypted', 'bindUntil'].forEach(x => { const e = get(x); if (e) e.classList.add('hidden'); });
+        modal(window.L.js_done, window.L.forget_done);
+    } catch (e) {
+        el.disabled = false;
+        el.classList.remove('armed');
+        el.innerText = window.L.forget_btn;
+        modal(window.L.js_error, window.L.forget_error);
+    }
+}
+
 const unlockM = () => start(get('recvP').value, 'btnM');
 const unlockA = () => start(decodeURIComponent(location.hash.substring(1)), 'btnA');
 
 if (location.pathname === '/gen' && location.search.includes('t=file')) loadS();
+initSent();
+initGen();
 if (location.hash.length > 1 && get('btnA')) {
     _autoMode = true;
     get('m-manual').classList.add('hidden');
@@ -2892,6 +3633,89 @@ if (location.hash.length > 1 && get('btnA')) {
     get('btnM').classList.add('hidden');
     if (!get('tsWidget')) get('btnA').classList.remove('hidden');
 }
+
+// ── Shoulder-surfing protection ─────────────────────────────────────────────
+// The decrypted secret lands on screen masked. Revealing it is a deliberate,
+// *held* gesture that ends the instant the user lets go, so the plaintext is
+// never sitting unattended in front of a room, a camera or a shared screen.
+//
+// Pointer and keyboard are both first-class paths. A hold-only control is
+// unusable with a keyboard or a switch device, which would push exactly the
+// users a masked field hurts most into having no way to read their own secret
+// (WCAG 2.1.1, and 2.5.7 on not requiring a drag-like gesture).
+//
+// Copying never requires revealing — that is the whole point of the pattern.
+var _revealStart = function(){};
+(function(){
+    var pre = get('content');
+    var btn = get('btnReveal');
+    if (!pre || !btn) return;
+
+    var label = btn.querySelector('span');
+    var holdTimer = null;
+
+    // Hard ceiling on one reveal. Covers "held it, then turned around" and any
+    // case where the matching release event never arrives (pointer stolen by a
+    // native gesture, key stuck behind a focus change).
+    var MAX_REVEAL_MS = 15000;
+
+    function paint(on) {
+        pre.classList.toggle('masked', !on);
+        btn.classList.toggle('revealed', on);
+        btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+        if (label) label.textContent = on ? window.L.reveal_visible : window.L.reveal_hold;
+    }
+
+    function hide() {
+        if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+        paint(false);
+    }
+
+    function show() {
+        if (holdTimer) clearTimeout(holdTimer);
+        holdTimer = setTimeout(hide, MAX_REVEAL_MS);
+        paint(true);
+    }
+
+    function isHoldKey(e) { return e.key === ' ' || e.key === 'Spacebar' || e.key === 'Enter'; }
+
+    // Called from __ACTIONS via the existing data-* delegation, so this needs no
+    // inline handler and the CSP stays exactly as strict as it was.
+    _revealStart = function(e, el) {
+        // Kills the text-selection drag and the iOS long-press callout that a
+        // held button would otherwise fire.
+        if (e.cancelable) e.preventDefault();
+        // Capture routes the release back here even if the pointer wanders off
+        // the button mid-hold, which is the common case on touch.
+        try { el.setPointerCapture(e.pointerId); } catch (err) {}
+        show();
+    };
+
+    // Window-level backstops for everything capture cannot catch.
+    window.addEventListener('pointerup', hide);
+    window.addEventListener('pointercancel', hide);
+    window.addEventListener('blur', hide);
+    document.addEventListener('visibilitychange', function(){ if (document.hidden) hide(); });
+
+    // Space and Enter both synthesise a click on a <button>, so the click path
+    // is suppressed and the hold is driven from keydown/keyup instead. Without
+    // this, one tap would latch the secret visible.
+    btn.addEventListener('keydown', function(e){
+        if (!isHoldKey(e)) return;
+        e.preventDefault();
+        if (e.repeat) return;
+        show();
+    });
+    btn.addEventListener('keyup', function(e){
+        if (!isHoldKey(e)) return;
+        e.preventDefault();
+        hide();
+    });
+    btn.addEventListener('blur', hide);
+    btn.addEventListener('click', function(e){ e.preventDefault(); });
+
+    paint(false);
+})();
 ${LANG_PICKER_JS}
 
 // ── Event delegation ────────────────────────────────────────────────────────
@@ -2903,6 +3727,7 @@ ${LANG_PICKER_JS}
 var __ACTIONS = {
     // Secrets panel
     genS: function(){ genS(); },
+    onGenMode: function(){ onGenMode(); },
     genK: function(){ genK(); },
     genFK: function(){ genFK(); },
     processStore: function(){ processStore(); },
@@ -2916,6 +3741,10 @@ var __ACTIONS = {
     // File list (dynamic HTML from loadS)
     del: function(e, el){ del(el.dataset.id); },
 
+    // Sent secrets list
+    toggleSent: function(){ toggleSent(); },
+    revokeSecret: function(e, el){ revokeSecret(el); },
+
     // URL shortener
     shorten: function(){ shorten(); },
     newLink: function(){
@@ -2926,8 +3755,10 @@ var __ACTIONS = {
     // Secret retrieval page
     unlockM: function(){ unlockM(); },
     unlockA: function(){ unlockA(); },
+    revealStart: function(e, el){ _revealStart(e, el); },
     bindConfirm: function(){ bindConfirm(); },
     bindCancel: function(){ bindCancel(); },
+    forgetSecret: function(e, el){ forgetSecret(el); },
 
     // E2EE file retrieval page
     e2eeUnlock: function(){ e2eeUnlock(); },
@@ -2994,6 +3825,10 @@ __dispatch('click');
 __dispatch('change');
 __dispatch('input');
 __dispatch('submit');
+// pointerdown is delegated too, so the hold-to-reveal button needs no inline
+// handler. The matching release is handled inside the reveal module rather than
+// here: a delegated pointerup would miss a release that happens off-target.
+__dispatch('pointerdown');
 `
 
 const BASE_HTML = (body: string, langCode: LangCode = 'en', langPickerHtml: string = '', tailScript: string = ''): string =>
@@ -3018,8 +3853,19 @@ function renderGen(type: string, t: Translations, langCode: LangCode): string {
         isCred
           ? `
       <div id="v-create">
-          <div class="label-row"><span>${t.label_secret}</span><span class="action-link" data-click="genS">${t.action_gen_password}</span></div>
+          <div class="label-row"><span>${t.label_secret}</span><span class="gen-controls">
+              <select id="genMode" class="gen-mode" data-change="onGenMode" aria-label="${t.gen_mode_label}">
+                  <option value="nist" selected>${t.gen_mode_nist}</option>
+                  <option value="eff">${t.gen_mode_eff}</option>
+                  <option value="bip39">${t.gen_mode_bip39}</option>
+                  <option value="legacy">${t.gen_mode_legacy}</option>
+                  <option value="key256">${t.gen_mode_key256}</option>
+                  <option value="key512">${t.gen_mode_key512}</option>
+              </select>
+              <span class="action-link" data-click="genS">${t.action_gen_password}</span>
+          </span></div>
           <textarea id="body" placeholder="${t.placeholder_secret}"></textarea>
+          <div class="gen-meta" id="genMeta"></div>
           <div class="label-row"><span>${t.label_encrypt_key}</span><span class="action-link" data-click="genK">${t.action_gen_key}</span></div>
           <input type="text" id="pass" placeholder="${t.placeholder_encrypt}">
           <div class="label-row"><span>${t.label_ttl}</span></div>
@@ -3046,6 +3892,19 @@ function renderGen(type: string, t: Translations, langCode: LangCode): string {
               <div class="input-group"><input type="text" id="linkE" readonly data-click="selectSelf"><button class="btn-copy" data-click="copyLink" data-target="linkE">${t.copy}</button><button class="btn-qr" data-click="qrLink" data-target="linkE" title="QR">QR</button></div>
           </div>
           <button class="btn" style="background:transparent; color:var(--text); border:1px solid var(--border-strong); margin-top:20px;" data-click="reload">${t.btn_new_operation}</button>
+      </div>
+      <div class="sent-section" id="sentSection">
+          <button type="button" class="sent-toggle" data-click="toggleSent" aria-expanded="false" aria-controls="sentBody">
+              <span class="sent-toggle-label">${t.sent_title}<span class="sent-count" id="sentCount"></span></span>
+              <span class="sent-who" id="sentWho"></span>
+              <svg class="sent-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+          <div class="sent-body" id="sentBody">
+              <div class="sent-body-inner">
+                  <div class="sent-hint">${t.sent_hint}</div>
+                  <div id="histBody" class="hist-empty">${t.sent_loading}</div>
+              </div>
+          </div>
       </div>`
           : isFile ? `
       <div id="v-file-upload">
@@ -3254,13 +4113,23 @@ function renderReceiveCred(_id: string, lang: Lang, langCode: LangCode, turnstil
     <button class="btn hidden" data-click="unlockA" id="btnA"><span>${lang.btn_open}</span><div class="spinner"></div></button>
     <div id="v-decrypted" class="hidden">
       <div class="label-row">${lang.label_decrypted}</div>
-      <pre id="content"></pre>
+      <div class="secret-wrap">
+        <pre id="content" class="masked"></pre>
+      </div>
+      <p id="revealHint" class="sr-only">${lang.reveal_a11y_hint}</p>
+      <div class="reveal-row" style="margin-top:14px;">
+        <button class="btn" type="button" id="btnReveal" data-pointerdown="revealStart" aria-pressed="false" aria-controls="content" aria-describedby="revealHint"><span>${lang.reveal_hold}</span></button>
+        <button class="btn-copy" type="button" data-click="copyContent">${lang.btn_copy}</button>
+      </div>
       <div style="position:relative; margin-top:20px;">
           <div class="timer-wrap" style="height:28px; margin-bottom:0;"><div id="tFill" class="timer-fill"></div></div>
           <div id="tText" class="timer-text" style="top:0; line-height:28px;"></div>
       </div>
       <div id="bindUntil" class="hidden" style="font-size:0.68rem; color:var(--text-muted); margin-top:12px; text-align:center; letter-spacing:0.04em; line-height:1.5"></div>
-      <button class="btn" style="margin-top:20px;" data-click="copyContent"><span>${lang.btn_copy}</span></button>
+      <div id="forgetRow" class="forget-row hidden">
+        <span class="forget-note">${lang.forget_note}</span>
+        <button class="btn-forget" type="button" id="btnForget" data-click="forgetSecret">${lang.forget_btn}</button>
+      </div>
     </div>
   </div><div id="ov" class="overlay"><div class="modal"><h3 id="mT"></h3><p id="mMsg"></p><button class="modal-btn" data-click="closeOverlay" data-target="ov">OK</button></div></div>${bindGate}`
   return BASE_HTML(body, langCode, lp, tsScript)

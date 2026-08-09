@@ -17,11 +17,15 @@ Secure, one-time sharing of passwords, files and links - built on Cloudflare Wor
 | **File sharing** | R2-backed, per-file and total caps admin-configurable in Appearance (defaults 9 GB / 9.5 GB, hard ceiling 50 GB), optional password, download limit, server-enforced TTL |
 | **E2EE file sharing** | Opt-in client-side AES-GCM + Argon2id for files up to 150 MiB. Server stores ciphertext only; passphrase travels in the URL fragment (or out-of-band) and never hits the server |
 | **Device-bound secrets** | Opt-in per secret. The link keeps working after the first read, but only from the browser or security key that opened it first. Lifetime configurable up to 30 days |
+| **Password generator standards** | Pick the standard the target system actually demands: NIST SP 800-63B, a memorable passphrase from the EFF Long or BIP-39 wordlist, legacy corporate character-class rules, or a 256/512-bit Base64 API key. Entropy is stated for each |
+| **Sent-secret ledger** | Each sender sees the secrets they created, whether anyone opened them, and how many times. Scoped to the signed-in CF Access identity, so senders never see each other's entries |
+| **Revocation** | A sender can destroy any secret they created, at any time, from the panel. A recipient of a device-bound secret can destroy it early from the retrieval page |
 | **URL shortener** | Short links with TTL and click limit, SSRF-safe, unbiased ID generation |
 | **Appearance editor** | Accent colour, background colour, brand name, tagline, logo, storage limits - all globally persistent |
 | **Dark / light mode** | System-detected per client, manually overridable |
 | **Drag-and-drop** | Full-screen dim overlay on the files tab; drops a file straight into the upload form |
-| **QR codes** | Server-rendered SVG QR on every output link - scan directly from desktop |
+| **QR codes** | SVG QR on every output link - scan directly from desktop. Rendered in the browser, so the link never has to be handed to the Worker to be drawn |
+| **Hold-to-reveal** | The decrypted secret is masked by default on the retrieval screen. It is shown only while the reveal button is held, and copying to the clipboard works without revealing anything |
 | **CF Access** | All write/admin endpoints protected by Cloudflare Access + RS256 JWT verification |
 | **Internationalisation** | 9 languages, auto-detected per user, flag picker in the UI |
 | **REST API** | Versioned `/api/v1/` - admin zone (`/api/v1/admin/*`) protected by CF Access, public zone (`/api/v1/public/*`) open; full docs in [docs/api.md](docs/api.md) |
@@ -184,6 +188,118 @@ means exactly one of two simultaneous first readers wins.
   a cookie-only binding. That decision is made once by the first reader and then
   pinned; no later client can request it.
 
+#### Password generator standards
+
+The generator next to the secret field offers the format the receiving system
+actually requires, rather than one compromise shape for every case:
+
+| Standard | Output | Entropy |
+|---|---|---|
+| NIST SP 800-63B | 20 characters, no forced symbol classes | 117 bits |
+| Memorable, EFF Long Wordlist | 6 words joined by hyphens | 77 bits |
+| Memorable, BIP-39 English | 12 words joined by hyphens | 132 bits |
+| Legacy corporate | exactly 12 characters, one of each class, symbol from `!@#$%^&*` | 64 bits |
+| API key | 32 or 64 random bytes, Base64 | 256 / 512 bits |
+
+The stated entropy is a floor, never a flattering upper bound. For the legacy
+mode in particular, counting all twelve characters as freely chosen would
+overstate it by roughly nine bits, because four are drawn from small
+class-specific alphabets; the shuffle that hides their positions is not credited
+either, since its permutations overlap.
+
+The passphrase modes use published wordlists rather than anything home-grown:
+
+| List | Words | Bits/word | Source |
+|---|---|---|---|
+| EFF Long Wordlist | 7776 | 12.925 | [eff.org](https://www.eff.org/files/2016/07/18/eff_large_wordlist.txt) |
+| BIP-39 English | 2048 | 11 | [bitcoin/bips](https://github.com/bitcoin/bips/blob/master/bip-0039/english.txt) |
+
+BIP-39 ships byte-identical to the standard, `sha256
+2f5eed53a4727b4bf8880d8f3f199efc90e58503646d9ff8eff3a2ed3b24dbda`. The EFF file
+is published as `<dice code>\t<word>` per line; only the second column is kept,
+since selection comes from the CSPRNG rather than from five dice and the codes
+would cost 18 KB on the wire for data the generator never reads. Reproduce with
+`cut -f2` over the published file (`sha256
+addd35536511597a02fa0a9ff1e5284677b8883b83e986e43f15a3db996b903e`).
+
+Note that four EFF entries contain a hyphen themselves (`t-shirt`, `yo-yo`,
+`drop-down`, `felt-tip`), so a six-word phrase can show more than five
+separators. This is cosmetic: entropy is one of 7776 per word either way.
+
+The BIP-39 mode draws twelve words, the seed-phrase convention the list is known
+for. These are twelve uniform draws and therefore 132 bits, not a valid BIP-39
+seed phrase, where the tail carries a checksum and the entropy is 128 bits.
+Nothing produced here is meant to be restored into a wallet.
+
+Every mode draws from `crypto.getRandomValues` in the browser, never
+`Math.random`. The server is never told what was generated, which is the same
+property the rest of the design rests on. Selection is unbiased in both cases:
+BIP-39 is exactly 2^11 entries, and EFF is not a power of two, so draws outside
+the largest whole multiple of 7776 are rejected and redrawn rather than folded
+in with a modulo.
+
+Each list is bundled into the Worker as a string constant, so serving it costs
+no storage read, and each has its own immutable, year-cached URL fetched only
+when someone selects that standard. Picking one never downloads the other, and a
+recipient opening `/receive/:id` downloads neither. On the wire that is 24 KB for
+EFF and 6 KB for BIP-39, once per browser per year.
+
+#### Sent-secret ledger and revocation
+
+A sender needs two things a burn-on-read link cannot give them: whether the
+secret was ever collected, and a way to pull it back if it was sent to the wrong
+person. Both live in a section directly below the generator on the secrets tab. Its
+header always shows how many secrets the account has and which account that is,
+so the disclosure itself carries the summary; expanding reveals the list. The
+open state is remembered between visits.
+
+The list shows what the signed-in sender created, newest first: the identifier,
+when it was made, whether it has been opened and how often, and how many wrong
+passphrases were tried against it. Anything still live carries a Revoke button
+that destroys the secret, its binding and any outstanding challenges. Creating a
+secret refreshes the list, so a link and its ledger entry appear together.
+
+```mermaid
+flowchart LR
+    A[Create secret] --> B[pending]
+    B -->|recipient reads it| C[opened]
+    B -->|TTL elapses| D[expired]
+    B -->|3 wrong passphrases| E[burned]
+    B -->|sender revokes| F[revoked]
+    C -->|sender revokes| F
+    C -->|recipient destroys| G[forgotten]
+```
+
+Ownership is derived from the Cloudflare Access JWT. The ledger stores
+`HMAC-SHA256(PEPPER, 'owner:' || subject)` and never the address itself, so a
+leaked copy of the table cannot be joined against the Access user directory, and
+changing an e-mail does not orphan what that person already sent. Scoping is
+enforced in the `WHERE` clause of every query rather than applied to results
+afterwards, and reusing another sender's identifier is refused outright.
+
+Zero-knowledge is unaffected. The ledger holds identifiers, timestamps and a
+status; never the verifier, the ciphertext, the passphrase or the URL fragment.
+Knowing an identifier is enough to build the link and nothing more, because the
+passphrase never leaves the fragment.
+
+Recipients get the mirror image of this on the retrieval page: a device-bound
+secret that survives its first read shows a destroy control, so the recipient can
+end access as soon as they are done rather than waiting out the window. It sits
+below a divider, after the reveal and copy actions, and is red at rest rather
+than only on hover, because it is irreversible and should never be mistaken for
+one of the primary controls. It takes two clicks. Being
+able to destroy requires being able to read, so the request has to clear the same
+gates a read does, the binding cookie plus a signature over a fresh challenge. An
+identifier alone will not do it, which is the difference between an emergency
+control and a denial-of-service hole.
+
+Two caveats worth stating plainly:
+
+- Revocation destroys the secret immediately, but KV is eventually consistent.
+  Reaching every Cloudflare edge location can take up to about a minute.
+- Secrets created before this feature, or created by a service token rather than
+  a user, carry no owner and therefore appear on nobody's list.
+
 ---
 
 ### Files
@@ -295,6 +411,15 @@ sequenceDiagram
 | **Pinned binding factor** | Whatever the first reader proves possession of is frozen in D1 and enforced verbatim on every later read. A later client can never negotiate a weaker factor, which is what makes the compatibility fallback safe |
 | **Single-use challenges** | Proof-of-possession challenges are consumed by an atomic `DELETE`, so a captured challenge cannot be replayed inside its TTL |
 | **Binding checked before the attempt counter** | An unbound client is refused before its verifier is compared, so a stranger holding the link cannot burn someone else's secret with wrong guesses |
+| **Per-sender isolation** | The sent-secret ledger is scoped by an owner hash inside the `WHERE` clause of every query, so no arrangement of parameters returns another sender's rows. Revoking an identifier that belongs to someone else answers 404 rather than 403, so the ledger cannot be probed for which identifiers exist |
+| **Pseudonymous ownership** | Ownership is recorded as `HMAC-SHA256(PEPPER, 'owner:' || CF Access subject)`. No e-mail or subject is stored, so a D1 leak cannot be correlated with the Access user directory |
+| **Recipient-side destruction gated on proof** | Destroying a bound secret early requires the binding cookie and a signature over a single-use challenge, the same gate a read must clear. A wrong passphrase on this path charges the same attempt counter, so it is not an unmetered oracle |
+| **Identifier collision refused** | Creating a secret under an identifier another sender already owns is rejected atomically by the insert's conflict clause, so neither the ciphertext nor the right to revoke can be taken over |
+| **Ledger holds no secret material** | Identifiers, timestamps and status only. No verifier, ciphertext, passphrase or URL fragment, and no recipient IP or user agent |
+| **Client-side QR rendering** | QR codes are generated in the browser from a lazily loaded encoder. Nothing about a link, least of all the fragment that carries the passphrase, is sent anywhere in order to draw it |
+| **Masked by default on reveal** | The decrypted secret renders masked; it is legible only while the reveal control is held, and the copy button reads it without ever unmasking. Limits shoulder-surfing and accidental exposure on shared screens |
+| **Stated entropy is a floor** | Every generator reports the lower bound of its search space, never a flattering figure. Class-constrained modes are counted as constrained, and shuffles are not credited |
+| **Generators use the CSPRNG only** | `crypto.getRandomValues` throughout, never `Math.random`. Selection is unbiased by rejection sampling wherever the alphabet or wordlist does not divide the random range evenly |
 | **Global Pepper** | File password hashes include a server-side secret; D1 leak doesn't compromise passwords |
 | **Server-side TTL cap** | Backend enforces maximum lifetime; client cannot exceed it |
 | **CF Access + JWT verification** | Protected endpoints guarded at two layers: Cloudflare Access policy + in-Worker RS256 JWT verification against JWKS endpoint (cached 1 h) |
@@ -578,10 +703,13 @@ than `127.0.0.1`, because WebAuthn refuses an IP address as an RP ID, and
 URL to the route in `wrangler.toml` and the origin check correctly rejects the
 browser's assertion.
 
-The D1 tables used by device binding are created from `schema/`, and must be
-applied before deploying a version that offers the feature:
+The D1 tables used by device binding and by the sent-secret ledger are created
+from `schema/`, and must be applied before deploying a version that offers those
+features:
 
 ```bash
 npx wrangler d1 execute secret-db --local  --file schema/002_device_bindings.sql
 npx wrangler d1 execute secret-db --remote --file schema/002_device_bindings.sql
+npx wrangler d1 execute secret-db --local  --file schema/003_sent_secrets.sql
+npx wrangler d1 execute secret-db --remote --file schema/003_sent_secrets.sql
 ```
