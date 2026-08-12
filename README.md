@@ -110,14 +110,14 @@ configure Access, so it leaves most of that list to do afterwards:
 
 ```mermaid
 flowchart TD
-    Browser -->|"protected routes<br/>/gen · /api/v1/admin/*"| CFA["Cloudflare Access<br/>JWT RS256 verification"]
-    Browser -->|"public routes<br/>/receive/:id · /share/:id<br/>/api/v1/public/* · /ui/*"| Worker
+    Browser -->|"/gen · /api/v1/admin/*"| CFA["Cloudflare Access policy"]
+    Browser -->|"/receive/:id · /share/:id · /api/v1/public/* · /ui/*"| Worker
 
-    CFA -->|verified request| Worker["Cloudflare Worker<br/>Hono / TypeScript"]
+    CFA -->|"JWT, re-verified in-Worker (RS256)"| Worker["Worker — Hono / TypeScript"]
 
-    Worker --> KV[("KV<br/>encrypted secrets")]
-    Worker --> D1[("D1<br/>file + ledger metadata")]
-    Worker --> R2[("R2<br/>file binaries")]
+    Worker --> KV[("KV — encrypted secrets")]
+    Worker --> D1[("D1 — file + ledger metadata")]
+    Worker --> R2[("R2 — file binaries")]
 ```
 
 | Resource | Holds |

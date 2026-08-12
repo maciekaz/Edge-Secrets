@@ -47,7 +47,7 @@ Files with a password and Turnstile active:
 
 1. Go to **Cloudflare Dashboard → Turnstile**
 2. Create a new site - choose **Managed** challenge type
-3. Add your domain (e.g. `secrets.example.com`)
+3. Add your domain (the hostname from the `routes` block of your `wrangler.toml`)
 4. Copy the **Site Key** (public) and **Secret Key** (server-side)
 
 ### 2. Store the secret key as a Cloudflare Secret

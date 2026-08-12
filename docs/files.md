@@ -64,8 +64,8 @@ read the file either way in this mode. See
 ```mermaid
 flowchart LR
     P[User password] --> H[SHA-256]
-    S[Per-file salt<br/>16 random bytes] --> H
-    K[PEPPER<br/>Cloudflare Secret] --> H
+    S["Per-file salt — 16 random bytes"] --> H
+    K["PEPPER — Cloudflare Secret"] --> H
     H --> DB[(Hash stored in D1)]
 ```
 

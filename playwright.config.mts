@@ -21,7 +21,7 @@ export default defineConfig({
     //   * the host must be `localhost`, not 127.0.0.1. WebAuthn refuses an IP
     //     address as an RP ID, so the whole flow silently fails on one.
     //   * --local-upstream must carry the port, otherwise wrangler rewrites the
-    //     request URL to the route in wrangler.toml (secrets.example.com) and the
+    //     request URL to the route configured in wrangler.toml, and the
     //     Worker's origin check correctly rejects the browser's assertion.
     command:
       'npx wrangler dev src/index.ts --port 8787 --ip 127.0.0.1 --local-upstream localhost:8787',
