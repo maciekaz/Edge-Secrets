@@ -2,11 +2,11 @@
 
 ## Supported Versions
 
-Edge Secrets is a rolling-release application designed to be deployed directly from the `main` branch to Cloudflare Workers. 
+Edge Secrets is a rolling-release application designed to be deployed directly from the `master` branch to Cloudflare Workers. 
 
 | Version | Supported          |
 | ------- | ------------------ |
-| Latest (`main` branch) | ✅ |
+| Latest (`master` branch) | ✅ |
 | Older commits | ❌ |
 
 Strongly recommend keeping your deployment up to date by periodically pulling the latest changes and running `npx wrangler deploy`.

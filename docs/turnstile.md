@@ -1,4 +1,10 @@
-# Turnstile - Bot & Brute-Force Protection
+# Turnstile — bot and brute-force protection
+
+[← Documentation index](README.md)
+
+Turnstile is **optional**. Leave it off if this install is mainly an automation
+path; turn it on when links are handed to people and you want a challenge in
+front of retrieval.
 
 Cloudflare Turnstile adds an invisible (managed) security challenge to protect secret retrieval and file downloads from bots and brute-force attacks. It can be enabled independently for each receiver type from the `/gen` settings panel.
 

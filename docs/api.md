@@ -1,4 +1,6 @@
-# Edge Secrets - API Reference
+# API Reference
+
+[← Documentation index](README.md)
 
 All API endpoints live under `/api/v1/`. They are split into two zones:
 
@@ -11,7 +13,11 @@ Cloudflare Access requires only **two rules** to protect the entire application:
 - `/gen` - the creation panel
 - `/api/v1/admin/*` - all write/admin API operations
 
-> Public UI routes (`/receive/:id`, `/share/:id`, `/s/:id`, `/ui/config`, `/ui/logo`) and public API routes (`/api/v1/public/*`) must remain outside the Access policy.
+> Public UI routes (`/receive/:id`, `/share/:id`, `/s/:id`, and everything under
+> `/ui/`) and public API routes (`/api/v1/public/*`) must remain outside the
+> Access policy — recipients have no account, so an Access rule reaching any of
+> them makes secrets unopenable. See
+> [deployment.md](deployment.md#7-protect-the-panel-with-cloudflare-access).
 
 ---
 
