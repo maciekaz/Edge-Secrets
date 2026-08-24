@@ -1,6 +1,6 @@
 {
   "name": "secrets-worker",
-  "version": "4.0.0",
+  "version": "4.1.0",
   "private": true,
   "scripts": {
     "dev": "wrangler dev src/index.ts",
