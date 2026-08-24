@@ -10,7 +10,27 @@ gone. Encryption happens in the browser, so the server you deployed — and
 Cloudflare underneath it — only ever holds ciphertext.
 
 **[Deploy it](docs/deployment.md)** · **[How it's secured](docs/security.md)** ·
-**[API reference](docs/api.md)** · **[All documentation](docs/README.md)**
+**[Command line](docs/cli.md)** · **[API reference](docs/api.md)** ·
+**[All documentation](docs/README.md)**
+
+---
+
+## Send it straight from your terminal
+
+A CLI ships with the project. `esecrets put`, paste the credential, and the link
+is on your clipboard — encrypted before it leaves the machine, never written to
+your shell history, never left sitting in your scrollback.
+
+<img alt="Creating a secret, uploading a file and shortening a link with the esecrets CLI" src="docs/media/esecrets.gif" width="824" />
+
+```bash
+npx esecrets put
+```
+
+Same encryption as the browser, same Argon2id parameters, so a secret made in
+the terminal opens in the browser and the other way round. Sign-in goes through
+your existing Cloudflare Access policy, as a real user — which is why the sender
+ledger and revocation work from here too. **[Full guide →](docs/cli.md)**
 
 ---
 
@@ -52,6 +72,7 @@ is a Worker.
 | **Appearance editor** | Accent colour, background, brand name, tagline, logo and storage limits, persisted globally |
 | **9 languages** | Auto-detected per visitor, with a flag picker. [Adding one →](docs/development.md#adding-a-language) |
 | **Cloudflare Access** | Every write and admin endpoint behind an Access policy plus in-Worker RS256 JWT verification |
+| **Command-line client** | `npx esecrets` — same client-side encryption, browser sign-in through Access, links copied straight to the clipboard. [Details →](docs/cli.md) |
 | **REST API** | Versioned `/api/v1/`, split into an authenticated admin zone and a public zone. [Reference →](docs/api.md) |
 
 ---

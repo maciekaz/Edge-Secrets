@@ -5,6 +5,7 @@ node_modules/
 wrangler.toml
 dist/
 scripts/
+demos/
 do_not_share_auth!/
 .DS_Store
 **/.DS_Store
