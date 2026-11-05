@@ -19,7 +19,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/maciekaz/edge-secrets.git",
+    "url": "git+https://github.com/maciekaz/Edge-Secrets.git",
     "directory": "cli"
   },
   "type": "module",
