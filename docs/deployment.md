@@ -19,7 +19,7 @@ the button cannot create your KV namespace, your database or your Access policy.
 | A Cloudflare account | Runs the Worker and all storage | Free |
 | A domain on Cloudflare | Workers need a route; `workers.dev` is disabled in the shipped config | Free (the domain itself is not) |
 | Cloudflare Zero Trust enabled | Protects the creation panel | Free up to 50 users |
-| Node.js 18 or newer | Runs Wrangler | Free |
+| Node.js 26.13.0 LTS | Development and release toolchain; version pinned in `.nvmrc` | Free |
 
 Turnstile is optional and can be added at any point later.
 

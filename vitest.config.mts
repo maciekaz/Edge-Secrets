@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { defineConfig } from 'vitest/config'
-import { cloudflareTest } from '@cloudflare/vitest-pool-workers'
+import { cloudflareTest } from '@cloudflare/vitest-plugin'
 
 // Read from wrangler.toml rather than hard-coded: that file is gitignored, and
 // the auxiliary worker below has to share the Worker's KV to serve the JWKS.

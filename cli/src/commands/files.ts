@@ -44,7 +44,7 @@ const DEFAULT_TTL = 86400
  * straight into the upload. And the loop, because a short read is legal: the
  * returned `bytesRead` is the only thing that says how much actually arrived.
  */
-async function readExactly(handle: FileHandle, start: number, end: number): Promise<Buffer> {
+async function readExactly(handle: FileHandle, start: number, end: number): Promise<Buffer<ArrayBuffer>> {
   const length = end - start
   const buffer = Buffer.alloc(length)
   let filled = 0
@@ -170,7 +170,7 @@ async function uploadEncrypted(
 
   note('encrypting locally')
   const handle = await open(path, 'r')
-  let plaintext: Buffer
+  let plaintext: Buffer<ArrayBuffer>
   try {
     plaintext = await readExactly(handle, 0, size)
   } finally {

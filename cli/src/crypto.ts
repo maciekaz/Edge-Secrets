@@ -36,7 +36,7 @@ export async function deriveVerifier(passphrase: string, id: string): Promise<st
 }
 
 export async function deriveKey(passphrase: string, id: string): Promise<webcrypto.CryptoKey> {
-  const bytes = await deriveBytes(passphrase, id, 'k')
+  const bytes = new Uint8Array(await deriveBytes(passphrase, id, 'k'))
   return crypto.subtle.importKey('raw', bytes, { name: 'AES-GCM', length: 256 }, false, ['encrypt'])
 }
 
@@ -58,7 +58,7 @@ export async function encryptSecret(plaintext: string, passphrase: string, id: s
  * Encrypt file bytes and return IV ‖ ciphertext, matching what the browser
  * uploads: the recipient peels the first 12 bytes off before decrypting.
  */
-export async function encryptFile(plaintext: Uint8Array, passphrase: string, id: string): Promise<Uint8Array> {
+export async function encryptFile(plaintext: Uint8Array<ArrayBuffer>, passphrase: string, id: string): Promise<Uint8Array> {
   const key = await deriveKey(passphrase, id)
   const iv = crypto.getRandomValues(new Uint8Array(12))
   const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plaintext))

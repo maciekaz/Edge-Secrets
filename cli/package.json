@@ -1,6 +1,6 @@
 {
   "name": "esecrets",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Command-line client for a self-hosted Edge Secrets deployment",
   "keywords": [
     "secrets",
@@ -35,13 +35,14 @@
   "scripts": {
     "build": "tsc",
     "lint": "tsc --noEmit",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "test": "npm run build && node --throw-deprecation test/smoke.mjs"
   },
   "dependencies": {
     "hash-wasm": "^4.12.0"
   },
   "devDependencies": {
-    "@types/node": "^22.10.0",
-    "typescript": "^5.7.0"
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2"
   }
 }

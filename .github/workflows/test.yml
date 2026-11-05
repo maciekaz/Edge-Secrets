@@ -1,0 +1,65 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  worker:
+    name: Worker and browser tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      WRANGLER_SEND_METRICS: 'false'
+      KV_NAMESPACE_ID: '00000000000000000000000000000001'
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+      - run: npm ci
+      - name: Prepare local test resources
+        run: |
+          cp test/wrangler.local.toml wrangler.toml
+          cat > .dev.vars <<'EOF'
+          PEPPER="test-pepper-not-production"
+          CF_TEAM_DOMAIN="test.cloudflareaccess.com"
+          CF_AUD="test-audience"
+          EOF
+      - run: npm run lint
+      - run: npm run build
+      - run: npm run test:unit
+      - run: npm audit
+      - name: Install Chromium
+        run: npx --no-install playwright install --with-deps chromium
+      - name: Prepare local D1 schema
+        run: |
+          for schema in schema/*.sql; do
+            npx --no-install wrangler d1 execute secret-db --local --file "$schema"
+          done
+      - run: npm run test:e2e
+
+  cli:
+    name: CLI tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+          cache-dependency-path: cli/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - run: npm audit
+      - run: npm pack --dry-run

@@ -1,6 +1,6 @@
 {
   "name": "secrets-worker",
-  "version": "4.1.0",
+  "version": "4.1.1",
   "private": true,
   "scripts": {
     "dev": "wrangler dev src/index.ts",
@@ -17,17 +17,15 @@
   },
   "dependencies": {
     "hash-wasm": "^4.12.0",
-    "hono": "^4.13.2",
+    "hono": "^4.13.16",
     "qrcode-generator": "^2.0.4"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.21.3",
-    "@cloudflare/workers-types": "^5.20260808.1",
-    "@playwright/test": "^1.62.1",
-    "@vitest/runner": "^4.1.10",
-    "@vitest/snapshot": "^4.1.10",
-    "typescript": "^5.9.3",
-    "vitest": "^4.1.10",
-    "wrangler": "^4.123.0"
+    "@cloudflare/workers-types": "^5.20261104.1",
+    "@playwright/test": "^1.64.1",
+    "typescript": "7.0.2",
+    "vitest": "5.1.0",
+    "wrangler": "^4.158.0",
+    "@cloudflare/vitest-plugin": "^1.6.0"
   }
 }

@@ -17,7 +17,7 @@ npx esecrets put
 
 ## Install
 
-Node.js 20+, plus [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)
+Node.js 20+ (Node.js 26.13.0 LTS recommended), plus [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)
 for signing in:
 
 ```bash

@@ -26,7 +26,8 @@ Or keep it around, if you use it often:
 npm install -g esecrets
 ```
 
-**Node.js 20 or newer** is the only runtime requirement. The package has a
+**Node.js 20 or newer** remains the runtime requirement. Use **Node.js 26.13.0 LTS**
+for a maintained runtime; development and release builds use this version. The package has a
 single dependency, `hash-wasm` — the same Argon2id build the Worker serves to
 browsers, which is what makes the two sides byte-compatible.
 

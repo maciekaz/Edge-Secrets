@@ -14,7 +14,7 @@ import * as files from './commands/files.js'
 import * as links from './commands/links.js'
 import * as session from './commands/session.js'
 
-const VERSION = '0.1.0'
+const VERSION = '0.1.1'
 
 const HELP = `esecrets — share secrets, files and links from the terminal
 

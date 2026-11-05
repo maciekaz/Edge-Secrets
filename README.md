@@ -109,10 +109,12 @@ three-attempt cap, device binding, and sender-side revocation.
 
 ## Getting started
 
+Use Node.js 26.13.0 LTS for development and deployment (pinned in `.nvmrc`).
+
 ```bash
 git clone https://github.com/maciekaz/edge-secrets
 cd edge-secrets
-npm install
+npm ci
 ```
 
 Then follow **[the deployment guide](docs/deployment.md)** — creating the
